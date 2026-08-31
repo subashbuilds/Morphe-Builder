@@ -1,0 +1,9 @@
+.venv
+__pycache__
+test.py
+.direnv
+bins/
+output/
+*.apk
+*.apkm
+*.mpp

@@ -1,0 +1,97 @@
+name: Build (single app, manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: 'App id from config.yml (e.g. youtube, youtube_music, instagram)'
+        required: true
+        type: string
+      version:
+        description: 'Exact version to build (optional -- leave blank to auto-detect from patches)'
+        required: false
+        type: string
+      force:
+        description: 'Rebuild even if this version was already released'
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: write
+  attestations: write
+  artifact-metadata: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.app }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        env:
+          DISABLE_MEDIA: true
+          TZ: America/Los_Angeles
+          LANG: en_US
+        ports:
+          - 8191:8191
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Wait for FlareSolverr to be ready
+        run: |
+          for i in {1..30}; do
+            if curl -s http://localhost:8191/health > /dev/null; then
+              echo "FlareSolverr is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "FlareSolverr did not become ready in time"
+          exit 1
+
+      - name: Build + publish the selected app
+        id: try_building
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TG_THREAD_ID: ${{ secrets.TG_THREAD_ID }}
+          FLARESOLVERR_URL: http://localhost:8191
+        run: |
+          args=(--app "${{ inputs.app }}")
+          if [ -n "${{ inputs.version }}" ]; then
+            args+=(--version "${{ inputs.version }}")
+          fi
+          if [ "${{ inputs.force }}" = "true" ]; then
+            args+=(--force)
+          fi
+          uv run main.py "${args[@]}"
+
+      - name: Generate Attestations
+        if: steps.try_building.outputs.has_output == 'true'
+        uses: actions/attest@v4.2.0
+        with:
+          subject-path: |
+            ./output/**/*.apk
+            ./output/**/*.zip
