@@ -237,7 +237,7 @@ def download(link, out, headers=None, cookies=None):
 def publish_release(
     tag: str, files: list[str], message: str, title: str = "", mark_latest: bool = False
 ):
-    """Create (or update) a GitHub release and upload `files` to it.
+    """Create (or replace) a GitHub release and upload `files` to it.
 
     BUGFIX: the old version always passed `--latest`. That's fine for a
     single-app repo, but once a repo builds several apps under different
@@ -245,6 +245,14 @@ def publish_release(
     become "the latest release" just means whichever app happened to build
     last in a given run "wins" and misrepresents the others as stale. It's
     now opt-in per call; main.py leaves it off for multi-app runs.
+
+    BUGFIX: `gh release create` has no flag to overwrite an existing
+    release -- it just fails with "a release with the same tag name already
+    exists". main.py only ever calls this with a tag that already has a
+    release when `--force` is used (a deliberate rebuild), so in that case
+    we delete the old release first and recreate it, rather than failing an
+    otherwise-successful build right at the last step. The underlying git
+    tag is left alone -- `gh release create` reuses it fine.
     """
     key = os.environ.get("GITHUB_TOKEN")
     if key is None:
@@ -252,6 +260,14 @@ def publish_release(
 
     if len(files) == 0:
         raise Exception("Files should have atleast one item")
+
+    if get_release_by_tag(get_repo(), tag) is not None:
+        print(f"Release {tag} already exists, deleting it before recreating (--force rebuild)")
+        subprocess.run(
+            ["gh", "release", "delete", tag, "--yes"],
+            env=os.environ.copy(),
+            check=True,
+        )
 
     command = ["gh", "release", "create", tag, "--notes", message, "--title", title]
     if mark_latest:
