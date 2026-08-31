@@ -1,4 +1,9 @@
-# Morphe Multi-App Builder
+<h2 align="center">Morphe Builder</h2>
+
+<p align="center">
+<img src="https://img.shields.io/github/actions/workflow/status/Subashbuilds/Morphe-Builder/.github%2Fworkflows%2Fbuild.yaml">
+<img src="https://img.shields.io/badge/Github-Release-blue?logo=github&link=https%3A%2F%2Fgithub.com%2Fsubashbuilds%2FMorphe-Builder%2Freleases">
+</p>
 
 Automatically build [Morphe](https://github.com/MorpheApp)/ReVanced-style patched
 APKs for **any number of apps**, from **any patches source**, on a schedule,
