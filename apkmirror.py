@@ -155,14 +155,41 @@ def get_variants(release_url: str, session: FlareSolverrSession) -> list[Variant
 def get_bundle_variant(release_url: str, session: FlareSolverrSession) -> Variant:
     """Get the single combined "bundle" (.apkm) variant for a release.
 
-    Only one download is needed per version: the CLI's --striplibs flag
-    derives every architecture-specific output from this one bundle, so we
-    no longer scrape/download once per architecture (see patch_runner.py).
+    A release page usually lists SEVERAL bundle variants: one "universal"
+    bundle containing every architecture's native-lib split plus every
+    density/language split, and separate narrower bundles that only contain
+    ONE architecture's native-lib split (to save size). We specifically want
+    the "universal" one:
+
+      * It's the only one guaranteed to contain every architecture, which
+        --striplibs derives every requested output from (see
+        patch_runner.py) -- picking a narrower bundle by accident would
+        silently produce incomplete non-"universal" outputs.
+      * A narrower bundle can also be missing density/resource-config
+        splits that are present in the universal bundle, which can surface
+        as resource lookups returning null/failing at runtime in the
+        patched app (e.g. "R.color.<name> is null") depending on exactly
+        which config splits the narrower bundle happened to include.
+
+    BUGFIX: the previous version just took the first `is_bundle` row on the
+    page, which is document order, not "most complete" -- on pages that list
+    an architecture-specific bundle before the universal one, this could
+    silently download the narrower bundle instead.
     """
     variants = get_variants(release_url, session=session)
-    bundle = next((v for v in variants if v.is_bundle), None)
-    if bundle is not None:
-        return bundle
+    bundles = [v for v in variants if v.is_bundle]
+
+    universal = next((v for v in bundles if v.architecture.lower() == "universal"), None)
+    if universal is not None:
+        return universal
+
+    if bundles:
+        print(
+            f"Warning: no 'universal' bundle found on {release_url}, "
+            f"falling back to a '{bundles[0].architecture}' bundle. "
+            "Non-matching --striplibs outputs may be incomplete."
+        )
+        return bundles[0]
 
     # Very old/simple releases sometimes only ever had a single plain APK
     # (no split configs, so no "BUNDLE" badge at all) -- fall back to it.

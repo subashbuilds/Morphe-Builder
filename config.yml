@@ -90,12 +90,12 @@ apps:
 
     # YouTube ships both, matching Morphe's own default recommendation.
     build_mode: "both"
-    architectures: ["arm64-v8a"]
+    architectures: ["arm64-v8a", "armeabi-v7a", "universal"]
 
     # Only read when build_mode is "module" or "both".
     module:
       id: "morphe-youtube"                   # must be unique across modules on-device
-      mount_path: "auto"                     # "auto" = resolved on-device via `pm path`
+      author: "subashbuilds"                 # shown in Magisk/KernelSU as the module author
 
     # include_patches / exclude_patches: leave empty to use Morphe's own
     # defaults for this app. Names must match `list-patches` output exactly.
@@ -115,10 +115,10 @@ apps:
     patches:
       repo: "MorpheApp/morphe-patches"
     build_mode: "both"
-    architectures: ["arm64-v8a"]
+    architectures: ["arm64-v8a", "universal"]
     module:
       id: "morphe-youtube-music"
-      mount_path: "auto"
+      author: "subashbuilds"
     include_patches: []
     exclude_patches: []
 
@@ -140,7 +140,7 @@ apps:
       asset_regex: '^patches.*\.mpp$'
     # Instagram/piko has no root "module" variant, only a normal APK.
     build_mode: "apk"
-    architectures: ["arm64-v8a"]
+    architectures: ["arm64-v8a", "armeabi-v7a", "x86_64"]
     include_patches: ["Theme", "Export all activities"]
     exclude_patches: []
 

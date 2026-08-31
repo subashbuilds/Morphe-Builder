@@ -1,31 +1,41 @@
 """Builds a flashable Magisk/KernelSU module (.zip) from a patched APK.
 
-IMPORTANT CAVEATS (please read before relying on this):
+HOW THIS WORKS (please read before relying on it):
 
-Morphe/ReVanced's own CLI does not produce Magisk modules -- its `--mount`
-flag only pushes a patched APK to an already-connected ADB device at patch
-time, it doesn't produce a distributable module artifact. So this file
-implements the well-established community pattern instead (the same one
-used by tools like j-hc/revanced-magisk-module): the module's service script
-bind-mounts our patched APK directly over the ALREADY-INSTALLED stock app's
-own APK file at every boot, using root. This means:
+Android's package manager only verifies an APK's signature at install time,
+not on every subsequent launch -- once a package has been genuinely
+installed and registered, the OS trusts whatever bytes are on disk at that
+path afterwards. So this module:
 
-  * The exact same version must already be installed from the Play Store
-    (or sideloaded) on the device -- this module does not install anything
-    on its own.
-  * It requires root (Magisk or KernelSU) and needs the module enabled +
-    a reboot to take effect.
-  * It assumes the installed app is a single, non-split APK. Play Store
-    installs are frequently SPLIT into base.apk + several split_*.apk files
-    (for architecture/density/language); mounting a single merged APK over
-    just base.apk in that situation is not guaranteed to work correctly.
-    Morphe's own single-file `-o` output is a merged, non-split APK, so this
-    is the same tradeoff as any other Magisk-mount-based patched-app module.
+  1. Ships a full copy of the STOCK (unpatched) app's split APKs, and force
+     -installs them via a real `pm install-create` / `install-write` /
+     `install-commit` session if the exact patched version isn't already
+     installed. A session install can create, upgrade, *or downgrade* a
+     package, which is what lets this work with no prior install of the
+     app, or a different version installed -- not just an exact match.
+  2. Bind-mounts the separately-patched APK directly over that
+     now-genuinely-installed copy's base.apk file. This is a filesystem
+     swap that happens *after* Android already trusted and registered the
+     real, validly-signed stock app, so it doesn't re-trigger signature
+     verification.
+  3. Re-applies the mount at every boot (service.sh), since bind mounts
+     don't survive a reboot on their own.
 
-This code cannot be exercised against a real rooted device inside a CI
-sandbox, so build_mode "module"/"both" should be treated as experimental --
-please test on a real device before relying on it. build_mode "apk" (the
-default) does not use any of this and is unaffected.
+This is the same well-established, widely-used community technique found in
+tools like j-hc/revanced-magisk-module (https://github.com/j-hc/revanced-magisk-module),
+which is GPLv3-licensed -- the shell scripts below are an independent,
+from-scratch implementation of the same *technique* (which is just standard,
+publicly documented Android `pm` session usage), not a copy of that
+project's code, so this repository's own license terms are unaffected.
+If you want the exact original implementation (e.g. its KernelSU unmount-
+detection helper), that project is the place to get it, under its own
+GPLv3 terms.
+
+CAVEATS:
+  * Requires root (Magisk or KernelSU).
+  * This cannot be exercised against a real rooted device inside a CI
+    sandbox -- treat build_mode "module"/"both" as experimental and test on
+    a real device before relying on it daily.
 """
 
 import os
@@ -34,141 +44,365 @@ import zipfile
 
 from config import AppConfig
 
-MODULE_PROP_TEMPLATE = """\
-id={module_id}
-name={name}
-version=v{version}
-versionCode={version_code}
-author=Morphe Multi-App Builder
-description={description}
-"""
+# .apkm bundles (see https://en.wikipedia.org/wiki/Android_App_Bundle /
+# Android's bundletool) name their native-library splits using these exact
+# tokens, e.g. "split_config.arm64_v8a.apk". Verified against real APKMirror
+# bundle naming conventions.
+ARCH_SPLIT_KEYWORDS = {
+    "arm64-v8a": "arm64_v8a",
+    "armeabi-v7a": "armeabi_v7a",
+    "x86_64": "x86_64",
+    "x86": "x86",
+}
 
-CUSTOMIZE_SH_TEMPLATE = """\
-#!/sbin/sh
-# shellcheck shell=sh
-SKIPUNZIP=0
 
-ui_print "- Installing {name} (Morphe patched, mounted over the stock app)"
-ui_print "- Package: {package_name}"
-ui_print "- Requires the SAME version already installed, plus a reboot."
-"""
-
-SERVICE_SH_TEMPLATE = """\
-#!/system/bin/sh
-# Runs at late_start service (i.e. once /data is decrypted and the package
-# manager is up). Bind-mounts our patched APK over the stock app's own APK
-# file so the system loads our patched code without a real re-install.
-MODDIR=${{0%/*}}
-PKG="{package_name}"
-PATCHED_APK="$MODDIR/app.apk"
-
-log_tag="{module_id}"
-
-if [ ! -f "$PATCHED_APK" ]; then
-    log -t "$log_tag" "patched apk missing at $PATCHED_APK, skipping mount"
-    exit 0
-fi
-
-# Wait (briefly) for the package manager service to be ready.
-i=0
-while [ "$i" -lt 60 ]; do
-    if pm path "$PKG" >/dev/null 2>&1; then
-        break
-    fi
-    i=$((i + 1))
-    sleep 1
-done
-
-{resolve_target}
-
-if [ -z "$TARGET_APK" ]; then
-    log -t "$log_tag" "could not resolve installed apk path for $PKG -- is it installed? not mounting."
-    exit 0
-fi
-
-if [ ! -f "$TARGET_APK" ]; then
-    log -t "$log_tag" "resolved path $TARGET_APK does not exist, not mounting"
-    exit 0
-fi
-
-mount -o bind "$PATCHED_APK" "$TARGET_APK" \\
-    && log -t "$log_tag" "mounted $PATCHED_APK over $TARGET_APK" \\
-    || log -t "$log_tag" "failed to bind-mount over $TARGET_APK"
-"""
-
-UNINSTALL_SH_TEMPLATE = """\
-#!/system/bin/sh
-# The bind mount created by service.sh only lives for the current boot and
-# is torn down automatically on the next reboot once this module has been
-# removed -- nothing else to clean up here.
-"""
-
-AUTO_RESOLVE_TARGET = """\
-TARGET_APK=$(pm path "$PKG" 2>/dev/null | grep "base.apk" | head -n1 | sed 's/^package://')
-if [ -z "$TARGET_APK" ]; then
-    # Some ROMs/apps only ever report a single, non-split path.
-    TARGET_APK=$(pm path "$PKG" 2>/dev/null | head -n1 | sed 's/^package://')
-fi
-"""
+class ModuleBuildError(Exception):
+    pass
 
 
 def _version_code(version: str) -> str:
     digits = "".join(ch for ch in version if ch.isdigit())
     if digits:
-        # Keep it a reasonable size for a 32-bit versionCode.
         return digits[-9:]
     return str(int(time.time()))
+
+
+def _extract_stock_splits(bundle_path: str, architecture: str, dest_dir: str) -> list[str]:
+    """Extract every *.apk entry from a downloaded .apkm bundle into
+    dest_dir, keeping only the native-lib split for `architecture` (or every
+    architecture's lib split when architecture == "universal"). Non-lib
+    splits (base.apk, density, language) are always kept -- the stock
+    install needs a complete, working app, not just the requested arch.
+    """
+    os.makedirs(dest_dir, exist_ok=True)
+    written: list[str] = []
+
+    with zipfile.ZipFile(bundle_path) as z:
+        for name in z.namelist():
+            if not name.lower().endswith(".apk"):
+                continue
+            base_name = os.path.basename(name)
+            # Match a dot-delimited segment exactly (e.g. the "x86_64" in
+            # "split_config.x86_64.apk") rather than a substring check --
+            # "x86" is a substring of "x86_64", so a naive `in` check would
+            # incorrectly keep the x86_64 lib split when building for x86.
+            segments = base_name.lower().replace("-", "_").split(".")
+
+            matched_arch = next(
+                (arch for arch, kw in ARCH_SPLIT_KEYWORDS.items() if kw in segments),
+                None,
+            )
+            if architecture != "universal" and matched_arch is not None and matched_arch != architecture:
+                continue  # a different architecture's native-lib split
+
+            dest_path = os.path.join(dest_dir, base_name)
+            with z.open(name) as src, open(dest_path, "wb") as dst:
+                dst.write(src.read())
+            written.append(dest_path)
+
+    if not written:
+        raise ModuleBuildError(f"No .apk entries found inside bundle: {bundle_path}")
+    return written
+
+
+# ---------------------------------------------------------------------------
+# Script templates. Kept short and readable rather than densely "clever" --
+# these run as /system/bin/sh (Android's ash-based shell), so no bashisms.
+# ---------------------------------------------------------------------------
+
+MODULE_PROP_TEMPLATE = """\
+id={module_id}
+name={name}
+version=v{version}
+versionCode={version_code}
+author={author}
+description={description}
+"""
+
+MODULE_CONF_TEMPLATE = """\
+MODULE_ID="{module_id}"
+MODULE_PKG_NAME="{package_name}"
+MODULE_PKG_VERSION="{version}"
+MODULE_APP_NAME="{app_label}"
+MODULE_ARCH_LIB="{arch_lib}"
+"""
+
+MOUNT_LIB_SH = """\
+#!/system/bin/sh
+# Shared helpers for this module's customize.sh / service.sh / action.sh /
+# uninstall.sh. The caller must set $MODDIR before sourcing this file.
+
+. "$MODDIR/module.conf"
+
+# Parked outside $MODDIR so tools that hide the module folder from a target
+# app (to dodge root detection) don't also hide the file we mount from.
+PARKED_APK="/data/adb/morphe_mounts/${MODULE_ID}.apk"
+
+pkg_installed_version() {
+	dumpsys package "$MODULE_PKG_NAME" 2>/dev/null \\
+		| grep -m1 'versionName=' | sed 's/^.*versionName=//' | cut -d' ' -f1
+}
+
+pkg_base_apk_path() {
+	pm path "$MODULE_PKG_NAME" 2>/dev/null | grep -m1 '/base\\.apk$' | sed 's/^package://'
+}
+
+install_stock_apks() {
+	TOTAL_BYTES=0
+	for f in "$MODDIR"/stock/*.apk; do
+		[ -f "$f" ] || continue
+		SZ=$(stat -c '%s' "$f" 2>/dev/null) || SZ=0
+		TOTAL_BYTES=$((TOTAL_BYTES + SZ))
+	done
+	if [ "$TOTAL_BYTES" = 0 ]; then
+		echo "! No stock APKs bundled in this module" >&2
+		return 1
+	fi
+
+	V_ADB=$(settings get global verifier_verify_adb_installs 2>/dev/null)
+	V_PKG=$(settings get global package_verifier_enable 2>/dev/null)
+	settings put global verifier_verify_adb_installs 0
+	settings put global package_verifier_enable 0
+
+	OK=1
+	SESSION_OUT=$(pm install-create --user 0 -r -d -g -i com.android.vending -S "$TOTAL_BYTES" 2>&1)
+	SESSION_ID=$(echo "$SESSION_OUT" | sed -n 's/.*\\[\\([0-9][0-9]*\\)\\].*/\\1/p')
+	if [ -z "$SESSION_ID" ]; then
+		echo "! install-create failed: $SESSION_OUT" >&2
+		OK=0
+	fi
+
+	if [ "$OK" = 1 ]; then
+		i=0
+		for f in "$MODDIR"/stock/*.apk; do
+			[ -f "$f" ] || continue
+			i=$((i + 1))
+			FSZ=$(stat -c '%s' "$f" 2>/dev/null) || FSZ=0
+			if ! WOUT=$(pm install-write -S "$FSZ" "$SESSION_ID" "split_${i}.apk" "$f" 2>&1); then
+				echo "! install-write failed for $f: $WOUT" >&2
+				OK=0
+				break
+			fi
+		done
+	fi
+
+	if [ "$OK" = 1 ]; then
+		COUT=$(pm install-commit "$SESSION_ID" 2>&1)
+		if ! echo "$COUT" | grep -qi success; then
+			echo "! install-commit failed: $COUT" >&2
+			OK=0
+		fi
+	else
+		[ -n "$SESSION_ID" ] && pm install-abandon "$SESSION_ID" >/dev/null 2>&1
+	fi
+
+	[ -n "$V_ADB" ] && settings put global verifier_verify_adb_installs "$V_ADB"
+	[ -n "$V_PKG" ] && settings put global package_verifier_enable "$V_PKG"
+
+	[ "$OK" = 1 ]
+}
+
+unmount_patched_apk() {
+	su -M -c "grep -F \\"$MODULE_PKG_NAME\\" /proc/mounts" 2>/dev/null | while read -r LINE; do
+		MP=${LINE#* } MP=${MP%% *}
+		su -M -c "umount -l \\"$MP\\"" 2>/dev/null
+	done
+}
+
+mount_patched_apk() {
+	BASEPATH=$(pkg_base_apk_path)
+	if [ -z "$BASEPATH" ]; then
+		echo "! Could not resolve installed base.apk path for $MODULE_PKG_NAME" >&2
+		return 1
+	fi
+
+	mkdir -p "$(dirname "$PARKED_APK")"
+	if [ -f "$MODDIR/base.apk" ]; then
+		mv -f "$MODDIR/base.apk" "$PARKED_APK"
+	fi
+	if [ ! -f "$PARKED_APK" ]; then
+		echo "! Patched APK not found at $PARKED_APK" >&2
+		return 1
+	fi
+
+	chcon u:object_r:apk_data_file:s0 "$PARKED_APK" 2>/dev/null
+	unmount_patched_apk
+	if ! OUT=$(su -M -c "mount -o bind \\"$PARKED_APK\\" \\"$BASEPATH\\"" 2>&1); then
+		echo "! bind mount failed: $OUT" >&2
+		return 1
+	fi
+	am force-stop "$MODULE_PKG_NAME" 2>/dev/null
+	return 0
+}
+"""
+
+CUSTOMIZE_SH = """\
+#!/system/bin/sh
+MODDIR="$MODPATH"
+. "$MODDIR/mount_lib.sh"
+
+ui_print " "
+ui_print "- $MODULE_APP_NAME (Morphe)"
+
+if [ -n "$MODULE_ARCH_LIB" ] && [ "$ARCH_LIB" != "$MODULE_ARCH_LIB" ]; then
+	abort "! This module was built for $MODULE_ARCH_LIB, this device reports $ARCH_LIB"
+fi
+
+set_perm_recursive "$MODPATH" 0 0 0755 0644 2>/dev/null
+
+INSTALLED_VERSION=$(pkg_installed_version)
+if [ "$INSTALLED_VERSION" = "$MODULE_PKG_VERSION" ]; then
+	ui_print "- $MODULE_PKG_NAME $INSTALLED_VERSION is already installed"
+elif [ -d "$MODDIR/stock" ] && [ -n "$(ls -A "$MODDIR/stock" 2>/dev/null)" ]; then
+	if [ -n "$INSTALLED_VERSION" ]; then
+		ui_print "- Replacing installed $MODULE_PKG_NAME $INSTALLED_VERSION with $MODULE_PKG_VERSION"
+	else
+		ui_print "- $MODULE_PKG_NAME isn't installed, installing $MODULE_PKG_VERSION"
+	fi
+	if ! install_stock_apks; then
+		abort "! Could not install stock $MODULE_PKG_NAME. See the log above for the reason."
+	fi
+else
+	abort "! $MODULE_PKG_NAME $MODULE_PKG_VERSION isn't installed and this module has no bundled stock APKs."
+fi
+
+ui_print "- Mounting patched $MODULE_APP_NAME"
+if ! mount_patched_apk; then
+	ui_print "! Mount failed now -- it will retry automatically on next boot."
+fi
+
+am force-stop "$MODULE_PKG_NAME" 2>/dev/null
+rm -rf "$MODDIR/stock"
+ui_print "- Done"
+"""
+
+SERVICE_SH = """\
+#!/system/bin/sh
+MODDIR=$(dirname "$(readlink -f "$0")")
+. "$MODDIR/mount_lib.sh"
+
+# Bind mounts don't survive a reboot -- re-apply once boot has finished and
+# the package manager is responsive again.
+until [ "$(getprop sys.boot_completed)" = 1 ]; do sleep 1; done
+sleep 5
+
+TRIES=0
+while [ "$TRIES" -lt 30 ]; do
+	[ -n "$(pkg_base_apk_path)" ] && break
+	TRIES=$((TRIES + 1))
+	sleep 2
+done
+
+mount_patched_apk
+"""
+
+UNINSTALL_SH = """\
+#!/system/bin/sh
+MODDIR=${0%/*}
+. "$MODDIR/module.conf"
+rm -f "/data/adb/morphe_mounts/${MODULE_ID}.apk"
+rmdir "/data/adb/morphe_mounts" 2>/dev/null
+"""
+
+ACTION_SH = """\
+#!/system/bin/sh
+MODDIR=$(dirname "$(readlink -f "$0")")
+. "$MODDIR/mount_lib.sh"
+
+if [ -n "$(su -M -c "grep -F \\"$MODULE_PKG_NAME\\" /proc/mounts" 2>/dev/null)" ]; then
+	unmount_patched_apk
+	am force-stop "$MODULE_PKG_NAME" 2>/dev/null
+	echo "* Unmounted -- $MODULE_APP_NAME reverted to stock until next toggle/reboot"
+else
+	if mount_patched_apk; then
+		echo "* Mounted -- $MODULE_APP_NAME is patched"
+	else
+		echo "* Failed to mount, see the module's log"
+	fi
+fi
+"""
+
+UPDATE_BINARY = """\
+#!/sbin/sh
+umask 022
+ui_print() { echo "$1"; }
+require_new_magisk() {
+  ui_print "*******************************"
+  ui_print " Please install Magisk v20.4+! "
+  ui_print "*******************************"
+  exit 1
+}
+OUTFD=$2
+ZIPFILE=$3
+mount /data 2>/dev/null
+[ -f /data/adb/magisk/util_functions.sh ] || require_new_magisk
+. /data/adb/magisk/util_functions.sh
+[ "$MAGISK_VER_CODE" -lt 20400 ] && require_new_magisk
+install_module
+exit 0
+"""
+
+UPDATER_SCRIPT = "#MAGISK\n"
 
 
 def build_magisk_module(
     app: AppConfig,
     patched_apk_path: str,
+    stock_bundle_path: str,
     version: str,
     architecture: str,
     out_path: str,
 ) -> str:
     assert app.module is not None
     module_id = app.module.id
-
-    if app.module.mount_path == "auto":
-        resolve_target = AUTO_RESOLVE_TARGET
-    else:
-        escaped_path = app.module.mount_path.replace('"', '\\"')
-        resolve_target = f'TARGET_APK="{escaped_path}"'
+    author = app.module.author
+    arch_lib = "" if architecture == "universal" else architecture
+    app_label = f"{app.name} (Morphe, {architecture})"
 
     description = (
-        f"Mounts the Morphe-patched {app.name} ({architecture}) over the "
-        f"installed app. Requires root + the same version already "
-        f"installed + a reboot. Experimental."
+        f"Force-installs stock {app.name} {version} if needed, then mounts "
+        f"the Morphe-patched APK over it. Requires root. Experimental."
     )
 
     module_prop = MODULE_PROP_TEMPLATE.format(
         module_id=module_id,
-        name=f"{app.name} (Morphe, {architecture})",
+        name=app_label,
         version=version,
         version_code=_version_code(version),
+        author=author,
         description=description,
     )
-    customize_sh = CUSTOMIZE_SH_TEMPLATE.format(
-        name=app.name, package_name=app.package_name
-    )
-    service_sh = SERVICE_SH_TEMPLATE.format(
-        package_name=app.package_name,
+    module_conf = MODULE_CONF_TEMPLATE.format(
         module_id=module_id,
-        resolve_target=resolve_target,
+        package_name=app.package_name,
+        version=version,
+        app_label=app_label,
+        arch_lib=arch_lib,
     )
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("module.prop", module_prop)
-        z.writestr("customize.sh", customize_sh)
-        z.writestr("service.sh", service_sh)
-        z.writestr("uninstall.sh", UNINSTALL_SH_TEMPLATE)
-        # Magisk needs an empty skip_mount / no auto-mount marker only if we
-        # don't want its default /system overlay behaviour -- we don't ship
-        # a /system tree at all (only service.sh does work), so nothing to
-        # add here.
-        z.write(patched_apk_path, "app.apk")
+    stock_dir = os.path.join(os.path.dirname(out_path), f".stock-{module_id}-{architecture}")
+    try:
+        stock_files = _extract_stock_splits(stock_bundle_path, architecture, stock_dir)
+
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("module.prop", module_prop)
+            z.writestr("module.conf", module_conf)
+            z.writestr("mount_lib.sh", MOUNT_LIB_SH)
+            z.writestr("customize.sh", CUSTOMIZE_SH)
+            z.writestr("service.sh", SERVICE_SH)
+            z.writestr("uninstall.sh", UNINSTALL_SH)
+            z.writestr("action.sh", ACTION_SH)
+            z.writestr("META-INF/com/google/android/update-binary", UPDATE_BINARY)
+            z.writestr("META-INF/com/google/android/updater-script", UPDATER_SCRIPT)
+            z.write(patched_apk_path, "base.apk")
+            for f in stock_files:
+                z.write(f, f"stock/{os.path.basename(f)}")
+    finally:
+        for f in os.listdir(stock_dir) if os.path.isdir(stock_dir) else []:
+            os.remove(os.path.join(stock_dir, f))
+        if os.path.isdir(stock_dir):
+            os.rmdir(stock_dir)
 
     return out_path

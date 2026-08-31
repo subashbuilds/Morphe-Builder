@@ -37,7 +37,7 @@ class SourceConfig:
 @dataclass
 class ModuleConfig:
     id: str
-    mount_path: str = "auto"
+    author: str = "Morphe Multi-App Builder"
 
 
 @dataclass
@@ -176,7 +176,7 @@ def load_config(path: str | Path = "config.yml") -> list[AppConfig]:
                 )
             module_cfg = ModuleConfig(
                 id=str(module_raw["id"]),
-                mount_path=str(module_raw.get("mount_path", "auto")),
+                author=str(module_raw.get("author", "Morphe Multi-App Builder")),
             )
 
         apps.append(
