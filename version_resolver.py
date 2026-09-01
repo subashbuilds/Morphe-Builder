@@ -25,7 +25,7 @@ Verified against real output from real patch bundles, e.g.:
 import re
 import subprocess
 
-_VERSION_LINE = re.compile(r"^(\S+)(?:\s+\[.*\])?\s+\(\d+ patches?\)\s*$")
+_VERSION_LINE = re.compile(r"^(\S+)(?:\s+\[.*\])?\s+\((\d+) patches?\)\s*$")
 
 
 class ListVersionsError(Exception):
@@ -41,6 +41,12 @@ def _run_cli(command: list[str]) -> str:
     return result.stdout
 
 
+def _version_sort_key(version: str) -> tuple[int, ...]:
+    """Numeric sort key so "21.04.223" > "20.51.39" even though they don't
+    have the same number of dot-separated parts."""
+    return tuple(int(d) for d in re.findall(r"\d+", version))
+
+
 def get_supported_versions(
     cli_jar: str,
     patches_files: list[str],
@@ -49,10 +55,19 @@ def get_supported_versions(
 ) -> list[str]:
     """Ask the CLI which app version(s) the given patches best support.
 
-    Returns versions newest/best-first (the CLI's own ordering), or an empty
-    list if the patches place no restriction on version for this package
-    (some patch sets are compatible with "any" version) -- callers should
-    fall back to APKMirror's own version listing in that case.
+    Returns versions newest/best-first, or an empty list if the patches
+    place no restriction on version for this package (some patch sets are
+    compatible with "any" version) -- callers should fall back to
+    APKMirror's own version listing in that case.
+
+    Ranking: the CLI's own "(N patches)" compatibility count is the primary
+    sort key (most-compatible first, exactly what "most common compatible
+    versions" is telling us), and version number descending is used only as
+    a tiebreaker between equally-compatible versions. We sort explicitly by
+    both rather than trusting the CLI's raw print order for ties, since
+    that ordering isn't a documented guarantee -- version numbers are
+    parsed and compared numerically (not as plain strings), so "21.04.223"
+    correctly ranks above "20.51.39" or "9.15.51" regardless of digit count.
     """
     command = ["java", "-jar", cli_jar, "list-versions"]
     for pf in patches_files:
@@ -63,10 +78,11 @@ def get_supported_versions(
 
     output = _run_cli(command)
 
-    versions: list[str] = []
+    entries: list[tuple[str, int]] = []
     for line in output.splitlines():
         match = _VERSION_LINE.match(line.strip())
         if match:
-            versions.append(match.group(1))
+            entries.append((match.group(1), int(match.group(2))))
 
-    return versions
+    entries.sort(key=lambda e: (e[1], _version_sort_key(e[0])), reverse=True)
+    return [version for version, _patch_count in entries]

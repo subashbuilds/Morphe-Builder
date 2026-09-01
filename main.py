@@ -130,15 +130,24 @@ def build_app(
         return None
 
     already_released = set() if force else _already_released_versions(repo, app)
-    remaining = [v for v in candidates if v not in already_released]
-
-    if not remaining:
-        print(f"[{app.id}] All candidate versions already released. Nothing to do.")
-        return None
 
     output_dir = os.path.join(OUTPUT_DIR, app.id)
 
-    for version in remaining:
+    for version in candidates:
+        if version in already_released:
+            # BUGFIX: this used to pre-filter every already-released version
+            # out of the list and then happily attempt whatever was left --
+            # which meant if the *best* candidate (e.g. 21.04.223) was
+            # already released, it would fall through and publish an
+            # OLDER candidate (e.g. 20.51.39) as if it were new, since that
+            # older version merely hadn't been released *by this repo*
+            # before. Candidates are best-first, so hitting an
+            # already-released one means we already have the best version
+            # currently buildable -- stop here rather than downgrading.
+            print(f"[{app.id}] {version} is already released and is the best "
+                  f"currently available candidate. Nothing new to build.")
+            return None
+
         print(f"[{app.id}] Attempting version {version}...")
         try:
             release_url = app.apkmirror_release_url(version)

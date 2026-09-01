@@ -68,11 +68,23 @@ def _version_code(version: str) -> str:
 
 
 def _extract_stock_splits(bundle_path: str, architecture: str, dest_dir: str) -> list[str]:
-    """Extract every *.apk entry from a downloaded .apkm bundle into
-    dest_dir, keeping only the native-lib split for `architecture` (or every
-    architecture's lib split when architecture == "universal"). Non-lib
-    splits (base.apk, density, language) are always kept -- the stock
-    install needs a complete, working app, not just the requested arch.
+    """Extract just enough from a downloaded .apkm bundle to force-install a
+    working copy of the stock app: base.apk, plus the native-lib split(s)
+    for `architecture` (every architecture's lib split when architecture ==
+    "universal").
+
+    Density/language config splits are deliberately dropped. A real
+    Play-Store install never receives every locale/density split either --
+    only the ones matching that specific device -- so base.apk alone
+    (which already embeds default/fallback resources) plus the correct
+    native libraries installs and runs fine; per Android's own app bundle
+    docs, density/language config splits are always optional, never
+    required. This matters a lot in practice: those splits made up the
+    overwhelming majority of a module's size (a real build showed 266MB for
+    YouTube, almost all of it ~30 language/density splits), and none of
+    their *resources* end up mattering anyway once the patched base.apk is
+    mounted over this stock install -- only its native libraries stay in
+    use, so shipping the rest was pure waste of build time and download size.
     """
     os.makedirs(dest_dir, exist_ok=True)
     written: list[str] = []
@@ -92,7 +104,11 @@ def _extract_stock_splits(bundle_path: str, architecture: str, dest_dir: str) ->
                 (arch for arch, kw in ARCH_SPLIT_KEYWORDS.items() if kw in segments),
                 None,
             )
-            if architecture != "universal" and matched_arch is not None and matched_arch != architecture:
+            is_base = base_name.lower() == "base.apk"
+
+            if not is_base and matched_arch is None:
+                continue  # a density or language config split -- not needed
+            if matched_arch is not None and architecture != "universal" and matched_arch != architecture:
                 continue  # a different architecture's native-lib split
 
             dest_path = os.path.join(dest_dir, base_name)
@@ -244,8 +260,20 @@ MODDIR="$MODPATH"
 ui_print " "
 ui_print "- $MODULE_APP_NAME (Morphe)"
 
-if [ -n "$MODULE_ARCH_LIB" ] && [ "$ARCH_LIB" != "$MODULE_ARCH_LIB" ]; then
-	abort "! This module was built for $MODULE_ARCH_LIB, this device reports $ARCH_LIB"
+# Magisk/KernelSU only provide $ARCH (arm / arm64 / x86 / x64) -- map it to
+# our own arch naming so it can be compared against $MODULE_ARCH_LIB below.
+# BUGFIX: this mapping was missing entirely, so the check below was always
+# comparing against an empty string and aborting on every device.
+case "$ARCH" in
+	arm) DEVICE_ARCH_LIB=armeabi-v7a ;;
+	arm64) DEVICE_ARCH_LIB=arm64-v8a ;;
+	x86) DEVICE_ARCH_LIB=x86 ;;
+	x64) DEVICE_ARCH_LIB=x86_64 ;;
+	*) DEVICE_ARCH_LIB="" ;;
+esac
+
+if [ -n "$MODULE_ARCH_LIB" ] && [ "$DEVICE_ARCH_LIB" != "$MODULE_ARCH_LIB" ]; then
+	abort "! This module was built for $MODULE_ARCH_LIB, this device reports $DEVICE_ARCH_LIB (ARCH=$ARCH)"
 fi
 
 set_perm_recursive "$MODPATH" 0 0 0755 0644 2>/dev/null
