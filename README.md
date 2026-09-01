@@ -27,7 +27,6 @@ not a code change.
   - [Adding a new app](#adding-a-new-app)
 - [Workflows](#workflows)
 - [Running locally](#running-locally)
-- [The "module" build mode](#the-module-build-mode)
 - [Troubleshooting](#troubleshooting)
 - [Credits](#credits)
 - [Disclaimer](#disclaimer)
@@ -178,25 +177,6 @@ running (`FLARESOLVERR_URL`, defaults to `http://localhost:8191`) — this is
 handled automatically as a service container in the GitHub Actions
 workflows.
 
-## The "module" build mode
-
-Morphe's own CLI does not produce Magisk/KernelSU modules. `build_mode:
-module` (or `both`) has this repo build one itself, using the common
-community pattern: a boot-time service script that bind-mounts the patched
-APK directly over the **already-installed** stock app.
-
-This means:
-
-- The **exact same version** must already be installed on the device
-  (from the Play Store or sideloaded).
-- It requires **root** (Magisk or KernelSU) and a **reboot** after
-  installing the module.
-- It's generated automatically, but this repository's automated pipeline
-  has no way to verify it actually mounts correctly on a real device —
-  **please test it yourself** before relying on it daily.
-
-`build_mode: apk` (the default) is a normal, self-contained APK and is
-unaffected by any of the above.
 
 ## Troubleshooting
 
