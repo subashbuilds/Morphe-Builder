@@ -1,8 +1,9 @@
 <h2 align="center">Morphe Builder</h2>
 
 <p align="center">
-<img src="https://img.shields.io/github/actions/workflow/status/Subashbuilds/Morphe-Builder/.github%2Fworkflows%2Fbuild.yaml">
-<a href="https://github.com/subashbuilds/Morphe-Builder/releases/" target="_blank">
+<a href="https://github.com/subashbuilds/Morphe-Builder/actions/" target="_blank">
+  <img src="https://img.shields.io/github/actions/workflow/status/Subashbuilds/Morphe-Builder/.github%2Fworkflows%2Fbuild.yaml?logo=github" alt="Badge Alt Text">
+</a><a href="https://github.com/subashbuilds/Morphe-Builder/releases/" target="_blank">
   <img src="https://img.shields.io/badge/Github-Releases-blue?logo=Github" alt="Badge Alt Text">
 </a>
   
