@@ -145,6 +145,20 @@ apps:
     include_patches: ["Theme", "Export all activities"]
     exclude_patches: []
 
+  - id: gboard
+    enabled: true
+    name: "Gboard"
+    package_name: "com.google.android.inputmethod.latin"
+    apkmirror:
+      org: "google-inc"
+      app: "gboard"
+      release_prefix: "gboard-the-google-keyboard"
+    patches:
+      repo: "jasonwu1994/Gboard-patches"
+    build_mode: "apk" 
+    architectures: ["arm64-v8a"]
+    include_patches: []
+    exclude_patches: []
 # -----------------------------------------------------------------------------
 # Example of adding a totally different dev's patches for a new app — just
 # uncomment and fill in, no code changes needed:
