@@ -91,7 +91,7 @@ apps:
 
     # YouTube ships both, matching Morphe's own default recommendation.
     build_mode: "both"
-    architectures: ["arm64-v8a", "armeabi-v7a", "universal"]
+    architectures: ["arm64-v8a", "universal"]
 
     # Only read when build_mode is "module" or "both".
     module:
@@ -141,7 +141,7 @@ apps:
       asset_regex: '^patches.*\.mpp$'
     # Instagram/piko has no root "module" variant, only a normal APK.
     build_mode: "apk"
-    architectures: ["arm64-v8a", "armeabi-v7a", "x86_64"]
+    architectures: ["arm64-v8a", "universal"]
     include_patches: ["Theme", "Export all activities"]
     exclude_patches: []
 
