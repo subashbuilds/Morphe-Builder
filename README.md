@@ -1,21 +1,32 @@
-<h2 align="center">Morphe Builder</h2>
+<h1 align="center">Morphe Builder</h1>
 
 <p align="center">
-<a href="https://github.com/subashbuilds/Morphe-Builder/actions/" target="_blank">
-  <img src="https://img.shields.io/github/actions/workflow/status/Subashbuilds/Morphe-Builder/.github%2Fworkflows%2Fbuild.yaml?logo=github" alt="Badge Alt Text">
-</a><a href="https://github.com/subashbuilds/Morphe-Builder/releases/" target="_blank">
-  <img src="https://img.shields.io/badge/Github-Releases-blue?logo=Github" alt="Badge Alt Text">
-</a>
-  
+  <a href="https://github.com/subashbuilds/Morphe-Builder/actions/workflows/build.yaml" target="_blank">
+    <img src="https://img.shields.io/github/actions/workflow/status/subashbuilds/Morphe-Builder/.github%2Fworkflows%2Fbuild.yaml?logo=github&label=build" alt="Build status">
+  </a>
+  <a href="https://github.com/subashbuilds/Morphe-Builder/releases/latest" target="_blank">
+    <img src="https://img.shields.io/github/v/release/subashbuilds/Morphe-Builder?logo=github&label=latest%20release" alt="Latest release">
+  </a>
+  <a href="https://github.com/subashbuilds/Morphe-Builder/releases" target="_blank">
+    <img src="https://img.shields.io/github/downloads/subashbuilds/Morphe-Builder/total?logo=android&label=downloads" alt="Total downloads">
+  </a>
+  <a href="./LICENSE" target="_blank">
+    <img src="https://img.shields.io/github/license/subashbuilds/Morphe-Builder" alt="License">
+  </a>
+  <a href="https://github.com/subashbuilds/Morphe-Builder/commits/main" target="_blank">
+    <img src="https://img.shields.io/github/last-commit/subashbuilds/Morphe-Builder" alt="Last commit">
+  </a>
 </p>
 
-Automatically build [Morphe](https://github.com/MorpheApp)/ReVanced-style patched
-APKs for **any number of apps**, from **any patches source**, on a schedule,
-using GitHub Actions.
+<p align="center">
+Automatically build <a href="https://github.com/MorpheApp">Morphe</a>/ReVanced-style patched APKs
+for <b>any number of apps</b>, from <b>any patches source</b>, on a schedule, using GitHub Actions.
+</p>
 
-Ships pre-configured for **YouTube**, **YouTube Music**, and **Instagram** —
-but adding another app, or another developer's patches, is a config edit,
-not a code change.
+<p align="center">
+Ships pre-configured for <b>YouTube</b>, <b>YouTube Music</b>, and <b>Instagram</b> —
+but adding another app, or another developer's patches, is a config edit, not a code change.
+</p>
 
 ---
 
@@ -28,32 +39,38 @@ not a code change.
   - [Adding a new app](#adding-a-new-app)
 - [Workflows](#workflows)
 - [Running locally](#running-locally)
+- [The "module" build mode](#the-module-build-mode)
 - [Troubleshooting](#troubleshooting)
 - [Credits](#credits)
+- [License](#license)
 - [Disclaimer](#disclaimer)
 
 ---
 
 ## How it works
 
-For every app marked `enabled: true` in [`config.yml`](./config.yml), the
-builder:
+For every app marked `enabled: true` in [`config.yml`](./config.yml), the builder:
 
 1. **Downloads** the Morphe CLI and the app's patches bundle from GitHub
-   Releases (with support for tracking either the latest stable release or
-   dev/pre-release builds).
+   Releases, tracking either the latest stable release or dev/pre-release
+   builds, per app.
 2. **Asks the patches themselves** which app version they currently support
-   best, using the CLI's own `list-versions` command — no fragile changelog
-   scraping, no hardcoded version numbers.
-3. **Downloads one combined APK bundle** from APKMirror for that version. If
-   that specific version can't be found or downloaded, it automatically
-   falls back to the next-best supported version instead of failing.
+   best, using the CLI's own `list-versions` command — no changelog
+   scraping, no hardcoded version numbers. Versions are ranked by how many
+   patches actually support them, with version number only as a tiebreaker.
+3. **Downloads one combined APK bundle** from APKMirror for that version.
+   If that specific version can't be downloaded, it automatically falls
+   back to the next-best supported version — but stops as soon as it hits a
+   version that's already been released, rather than "falling through" to
+   publish something older than what's already out.
 4. **Patches** the bundle once per configured architecture, producing a
-   plain installable APK and/or an experimental root module, depending on
-   your config.
-5. **Publishes a GitHub release** for that app and version, and skips
-   straight past apps that haven't changed since the last run — so the
-   daily schedule doesn't spam you with duplicate releases.
+   plain installable APK and/or a Magisk/KernelSU root module, depending on
+   your config — built as two genuinely separate patch runs so the module
+   never gets the "GmsCore support" patch, which is only meant for
+   non-rooted installs and actively conflicts with a root/mount install.
+5. **Publishes a GitHub release** per app and version, and does nothing at
+   all once you're already up to date — so the daily schedule doesn't spam
+   you with duplicate or redundant releases.
 
 ## Quick start
 
@@ -102,7 +119,7 @@ apps:
     architectures: ["arm64-v8a", "armeabi-v7a", "universal"]
     module:
       id: "morphe-youtube"
-      mount_path: "auto"
+      author: "subashbuilds"
 ```
 
 ### Config reference
@@ -121,7 +138,8 @@ apps:
 | `cli.repo` / `cli.asset_regex` / `cli.channel` | app/defaults | Same idea, for the patcher CLI jar itself. Rarely needs overriding per app. |
 | `build_mode` | app/defaults | `"apk"`, `"module"`, or `"both"`. See [below](#the-module-build-mode). |
 | `architectures` | app/defaults | Any of `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, `universal`. One APKMirror download is reused for all of them. |
-| `module.id` / `module.mount_path` | app | Required when `build_mode` is `module`/`both`. See below. |
+| `module.id` | app | Required when `build_mode` is `module`/`both`. Must be unique across modules installed on a device. |
+| `module.author` | app, optional | Shown as the module's author in Magisk/KernelSU. Defaults to a generic name if omitted. |
 | `include_patches` / `exclude_patches` | app | Patch names to force on/off, matching `list-patches` output exactly. Leave empty to use the patch bundle's own defaults. |
 | `version` | app, optional | Pin an exact version instead of auto-detecting one. |
 
@@ -178,14 +196,51 @@ running (`FLARESOLVERR_URL`, defaults to `http://localhost:8191`) — this is
 handled automatically as a service container in the GitHub Actions
 workflows.
 
+## The "module" build mode
+
+Morphe's own CLI doesn't produce Magisk/KernelSU modules — `build_mode:
+module` (or `both`) has this repo build one itself:
+
+1. It ships a copy of the **stock** (unpatched) app's split APKs inside the
+   module.
+2. On install (or boot, if needed again), it force-installs those stock
+   APKs via a real root `pm` session if the exact patched version isn't
+   already installed — a session install can create, upgrade, *or
+   downgrade* a package, so this works even with **no prior install of the
+   app, or a different version installed**, not just an exact match.
+3. It then bind-mounts the separately-patched APK directly over that
+   now-genuinely-installed copy's `base.apk`. Android only checks an APK's
+   signature at install time, not on every launch, so this file swap
+   doesn't retrigger signature verification.
+4. The mount is re-applied automatically at every boot, since bind mounts
+   don't survive a reboot on their own.
+
+Only `base.apk` and the relevant architecture's native-library split are
+bundled for the stock install step — not every language/density split the
+original upload contains — since none of that matters once the patched
+`base.apk` is mounted over it anyway. This keeps module size and build time
+down.
+
+This is the same well-established technique used by tools like
+[j-hc/revanced-magisk-module](https://github.com/j-hc/revanced-magisk-module);
+this repo's implementation was written independently from scratch (that
+project is GPL-3.0, and copying its code would carry that license's
+obligations into this repo).
+
+**Requires root** (Magisk or KernelSU). It's generated automatically, but
+this repo's CI pipeline has no way to verify it actually mounts correctly
+on a real device — please test it yourself before relying on it daily.
+`build_mode: apk` (the default) is a normal, self-contained APK and is
+unaffected by any of the above.
 
 ## Troubleshooting
 
 **A release didn't get updated even though I expected a new version.**
 Check the workflow run's logs — the builder tries every version its patches
-currently support, newest first, and only gives up after all of them fail.
-The log will show exactly why each attempt was skipped (e.g. no matching
-APKMirror release, no download variant, patch failure).
+currently support, newest first, and only gives up after all of them fail
+or one is already released. The log shows exactly why each attempt was
+skipped (e.g. no matching APKMirror release, no download variant, patch
+failure, or "already released, nothing new to build").
 
 **"list-patches failed" / no candidate versions found.**
 This usually means the patches bundle places no restriction on the app
@@ -200,6 +255,10 @@ GitHub Actions provides automatically — you shouldn't need to do anything.
 If running locally, export a personal access token as `GITHUB_TOKEN` to get
 the same higher rate limit.
 
+**A Magisk/KernelSU module fails to flash with an architecture error.**
+The module is built for one specific architecture (or "universal") — make
+sure you're flashing the variant that matches your device.
+
 **Telegram notifications aren't sending.**
 They're optional. If `TG_TOKEN` isn't set as a repo secret, that step is
 skipped automatically and never fails the build.
@@ -211,8 +270,21 @@ skipped automatically and never fails the build.
   based on.
 - [crimera/piko](https://github.com/crimera/piko) — third-party
   Instagram/X patches used by the default config.
-- [j-hc](https://github.com/j-hc) — this build pipeline's structure was
-  inspired by j-hc's ReVanced/Morphe builder templates.
+- [j-hc](https://github.com/j-hc) — this build pipeline's general structure,
+  and the idea behind the Magisk module's stock-install-then-mount
+  technique, were inspired by j-hc's ReVanced/Morphe builder templates.
+
+## License
+
+This project is licensed under the [MIT License](./LICENSE) — you're free
+to use, modify, and redistribute it, including commercially, as long as the
+original copyright notice is kept.
+
+This choice is deliberate: none of this repo's own code is derived from
+GPL-licensed sources (the Morphe CLI and patches are invoked as external
+tools, not embedded, and the Magisk module scripts were written from
+scratch rather than copied from GPL-3.0 projects), so nothing here requires
+copyleft licensing.
 
 ## Disclaimer
 
