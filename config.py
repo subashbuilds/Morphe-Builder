@@ -16,6 +16,26 @@ VALID_ARCHITECTURES = {"arm64-v8a", "armeabi-v7a", "x86_64", "x86", "universal"}
 VALID_BUILD_MODES = {"apk", "module", "both"}
 VALID_CHANNELS = {"latest", "dev"}
 
+# Some third-party patches report a "compatible version" string that isn't a
+# clean app version number -- e.g. one real patches repo returned
+# "18.0.3.954559732-release-arm64-v8a" from `list-versions` for Gboard,
+# apparently baking its own release-type/architecture targeting into the
+# version string. APKMirror's release URLs don't include that, and our own
+# template already appends "-release" itself, so left as-is this produced a
+# broken double-suffixed URL. This strips a trailing (-release)?-<arch> or
+# bare trailing -release, but ONLY those specific, recognized tokens --
+# nothing else is touched, so version strings that legitimately end in
+# something else (e.g. X/Twitter's real "12.7.1-release.0") are unaffected.
+_ARCH_TOKENS = r"arm64[-_]v8a|armeabi[-_]v7a|x86[-_]64|x86"
+_TRAILING_RELEASE_ARCH = re.compile(rf"(-release)?-(?:{_ARCH_TOKENS})$", re.IGNORECASE)
+_TRAILING_RELEASE = re.compile(r"-release$", re.IGNORECASE)
+
+
+def _clean_version_for_apkmirror(version: str) -> str:
+    cleaned = _TRAILING_RELEASE_ARCH.sub("", version)
+    cleaned = _TRAILING_RELEASE.sub("", cleaned)
+    return cleaned
+
 
 class ConfigError(Exception):
     """Raised when config.yml is missing a required field or has a bad value."""
@@ -67,7 +87,7 @@ class AppConfig:
         return self.build_mode in ("module", "both")
 
     def apkmirror_release_url(self, version_dashed_or_dotted: str) -> str:
-        version_dashed = version_dashed_or_dotted.replace(".", "-")
+        version_dashed = _clean_version_for_apkmirror(version_dashed_or_dotted).replace(".", "-")
         return (
             f"https://www.apkmirror.com/apk/{self.apkmirror_org}/{self.apkmirror_app}/"
             f"{self.apkmirror_release_prefix}-{version_dashed}-release/"

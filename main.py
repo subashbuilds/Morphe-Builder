@@ -28,6 +28,7 @@ Usage:
 
 import argparse
 import os
+import re
 import traceback
 
 import apkmirror
@@ -66,13 +67,30 @@ def _release_tag(app: AppConfig, version: str) -> str:
     return f"{app.id}-{version}"
 
 
-def _already_released_versions(repo: str, app: AppConfig) -> set[str]:
+def _already_released_versions(repo: str, app: AppConfig) -> dict[str, "github.GithubRelease"]:
+    """Map version -> the existing release for it, for every version of
+    `app` this repo has already published."""
     prefix = f"{app.id}-"
     return {
-        release.tag_name[len(prefix):]
+        release.tag_name[len(prefix):]: release
         for release in github.list_releases(repo)
         if release.tag_name.startswith(prefix)
     }
+
+
+_RECORDED_PATCHES_TAG = re.compile(r"^Patches:\s+\S+\s+(\S+)\s+\(channel:", re.MULTILINE)
+
+
+def _recorded_patches_tag(release: "github.GithubRelease") -> str | None:
+    """Pull the patches tag we ourselves wrote into a past release's notes
+    (see the `message = ...` block below), so we can tell whether the
+    patches have moved on since that release was built. Returns None if it
+    can't be determined (including the "(version unknown)" case, which
+    contains a space and so never matches \\S+ -- treated the same as "no
+    information available").
+    """
+    match = _RECORDED_PATCHES_TAG.search(release.body or "")
+    return match.group(1) if match else None
 
 
 def _resolve_candidate_versions(
@@ -129,24 +147,38 @@ def build_app(
         print(f"[{app.id}] --check: candidates resolved OK, stopping before any network/publish step.")
         return None
 
-    already_released = set() if force else _already_released_versions(repo, app)
+    already_released = {} if force else _already_released_versions(repo, app)
 
     output_dir = os.path.join(OUTPUT_DIR, app.id)
 
     for version in candidates:
-        if version in already_released:
-            # BUGFIX: this used to pre-filter every already-released version
-            # out of the list and then happily attempt whatever was left --
-            # which meant if the *best* candidate (e.g. 21.04.223) was
-            # already released, it would fall through and publish an
-            # OLDER candidate (e.g. 20.51.39) as if it were new, since that
-            # older version merely hadn't been released *by this repo*
-            # before. Candidates are best-first, so hitting an
-            # already-released one means we already have the best version
-            # currently buildable -- stop here rather than downgrading.
-            print(f"[{app.id}] {version} is already released and is the best "
-                  f"currently available candidate. Nothing new to build.")
-            return None
+        existing_release = already_released.get(version)
+        if existing_release is not None:
+            recorded_tag = _recorded_patches_tag(existing_release)
+            if recorded_tag is None or recorded_tag == patches_tag:
+                # BUGFIX: this used to pre-filter every already-released
+                # version out of the list and then happily attempt
+                # whatever was left -- which meant if the *best* candidate
+                # (e.g. 21.04.223) was already released, it would fall
+                # through and publish an OLDER candidate (e.g. 20.51.39) as
+                # if it were new. Candidates are best-first, so hitting an
+                # already-released one (with unchanged patches) means we
+                # already have the best version currently buildable --
+                # stop here rather than downgrading.
+                print(f"[{app.id}] {version} is already released (patches unchanged) "
+                      f"and is the best currently available candidate. Nothing new to build.")
+                return None
+            # BUGFIX: a patches repo can publish a new release that adds/
+            # fixes patches without the target app version changing at all
+            # (common when the app itself hasn't updated recently). Only
+            # comparing app versions meant this case was silently treated
+            # as "nothing to do" forever. If the *recorded* patches tag on
+            # the existing release differs from the one we just downloaded,
+            # this version needs rebuilding even though it was released
+            # before -- publish_release() already knows how to overwrite an
+            # existing tag, so this falls through to a normal build below.
+            print(f"[{app.id}] {version} was released with patches {recorded_tag}, "
+                  f"but {patches_tag} is now available -- rebuilding.")
 
         print(f"[{app.id}] Attempting version {version}...")
         try:
