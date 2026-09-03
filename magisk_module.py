@@ -68,23 +68,21 @@ def _version_code(version: str) -> str:
 
 
 def _extract_stock_splits(bundle_path: str, architecture: str, dest_dir: str) -> list[str]:
-    """Extract just enough from a downloaded .apkm bundle to force-install a
-    working copy of the stock app: base.apk, plus the native-lib split(s)
-    for `architecture` (every architecture's lib split when architecture ==
-    "universal").
+    """Extract every *.apk entry from a downloaded .apkm bundle into
+    dest_dir, keeping only the native-lib split for `architecture` (or every
+    architecture's lib split when architecture == "universal"). Non-lib
+    splits (base.apk, density, language) are always kept.
 
-    Density/language config splits are deliberately dropped. A real
-    Play-Store install never receives every locale/density split either --
-    only the ones matching that specific device -- so base.apk alone
-    (which already embeds default/fallback resources) plus the correct
-    native libraries installs and runs fine; per Android's own app bundle
-    docs, density/language config splits are always optional, never
-    required. This matters a lot in practice: those splits made up the
-    overwhelming majority of a module's size (a real build showed 266MB for
-    YouTube, almost all of it ~30 language/density splits), and none of
-    their *resources* end up mattering anyway once the patched base.apk is
-    mounted over this stock install -- only its native libraries stay in
-    use, so shipping the rest was pure waste of build time and download size.
+    REVERTED a previous "optimization" here that dropped density/language
+    splits to save size, based on the assumption that they're always
+    optional. That held for a *fresh* install, but broke real upgrades: a
+    device that already has the app installed with its full set of splits
+    rejects a session that provides a narrower set with
+    "INSTALL_FAILED_MISSING_SPLIT" -- confirmed against a real device log.
+    Only excluding OTHER architectures' native-lib splits is safe (a real
+    device install never receives another architecture's libs either way),
+    so that part is kept; everything else from the bundle is included so
+    the stock install session is always a complete, self-consistent set.
     """
     os.makedirs(dest_dir, exist_ok=True)
     written: list[str] = []
@@ -104,11 +102,7 @@ def _extract_stock_splits(bundle_path: str, architecture: str, dest_dir: str) ->
                 (arch for arch, kw in ARCH_SPLIT_KEYWORDS.items() if kw in segments),
                 None,
             )
-            is_base = base_name.lower() == "base.apk"
-
-            if not is_base and matched_arch is None:
-                continue  # a density or language config split -- not needed
-            if matched_arch is not None and architecture != "universal" and matched_arch != architecture:
+            if architecture != "universal" and matched_arch is not None and matched_arch != architecture:
                 continue  # a different architecture's native-lib split
 
             dest_path = os.path.join(dest_dir, base_name)
