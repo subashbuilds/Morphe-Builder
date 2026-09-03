@@ -152,7 +152,11 @@ def get_variants(release_url: str, session: FlareSolverrSession) -> list[Variant
     return variants
 
 
-def get_bundle_variant(release_url: str, session: FlareSolverrSession) -> Variant:
+def get_bundle_variant(
+    release_url: str,
+    session: FlareSolverrSession,
+    preferred_architectures: list[str] | None = None,
+) -> Variant:
     """Get the single combined "bundle" (.apkm) variant for a release.
 
     A release page usually lists SEVERAL bundle variants: one "universal"
@@ -175,6 +179,22 @@ def get_bundle_variant(release_url: str, session: FlareSolverrSession) -> Varian
     page, which is document order, not "most complete" -- on pages that list
     an architecture-specific bundle before the universal one, this could
     silently download the narrower bundle instead.
+
+    BUGFIX: some apps (e.g. Gboard) never publish a "universal" bundle at
+    all, only per-architecture ones. In that case, `preferred_architectures`
+    (pass the app's configured `architectures` list) is checked in the
+    order given, so the fallback picks a bundle that's actually one of the
+    architectures being built -- not just whatever happens to be listed
+    first on the page, which could be an architecture nobody asked for and
+    won't run on the device it's meant for.
+
+    Note: --striplibs can only narrow down libraries that are already
+    present in the source bundle, not add missing ones. If no universal
+    bundle exists and the source bundle only covers one non-universal
+    architecture, any OTHER requested architecture derived from it via
+    --striplibs will end up with no matching native libraries at all. List
+    your actual target architecture first in config.yml's `architectures`
+    so it's the one this fallback prefers.
     """
     variants = get_variants(release_url, session=session)
     bundles = [v for v in variants if v.is_bundle]
@@ -183,11 +203,23 @@ def get_bundle_variant(release_url: str, session: FlareSolverrSession) -> Varian
     if universal is not None:
         return universal
 
+    for arch in preferred_architectures or []:
+        if arch.lower() == "universal":
+            continue  # already checked above
+        match = next((v for v in bundles if v.architecture.lower() == arch.lower()), None)
+        if match is not None:
+            print(
+                f"No 'universal' bundle found on {release_url}; "
+                f"using the configured '{arch}' bundle instead."
+            )
+            return match
+
     if bundles:
         print(
-            f"Warning: no 'universal' bundle found on {release_url}, "
-            f"falling back to a '{bundles[0].architecture}' bundle. "
-            "Non-matching --striplibs outputs may be incomplete."
+            f"Warning: no 'universal' bundle (or any configured architecture's "
+            f"bundle) found on {release_url}, falling back to a "
+            f"'{bundles[0].architecture}' bundle. Non-matching --striplibs "
+            "outputs may be incomplete."
         )
         return bundles[0]
 

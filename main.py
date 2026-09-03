@@ -183,7 +183,9 @@ def build_app(
         print(f"[{app.id}] Attempting version {version}...")
         try:
             release_url = app.apkmirror_release_url(version)
-            bundle = apkmirror.get_bundle_variant(release_url, session=session)
+            bundle = apkmirror.get_bundle_variant(
+                release_url, session=session, preferred_architectures=app.architectures
+            )
 
             apk_path = os.path.join(BINS_DIR, "downloads", f"{app.id}-{version}.apkm")
             apkmirror.download_apk(bundle, apk_path, session=session)
