@@ -2,8 +2,8 @@ name: Build (all enabled apps)
 
 on:
   schedule:
-    - cron: '0 0 * * 0' 
-      timezone: Asia/Kolkata
+  #  - cron: '0 0 * * 0' 
+   #   timezone: Asia/Kolkata
   workflow_dispatch:
     inputs:
       force:

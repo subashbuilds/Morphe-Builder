@@ -15,6 +15,7 @@ import yaml
 VALID_ARCHITECTURES = {"arm64-v8a", "armeabi-v7a", "x86_64", "x86", "universal"}
 VALID_BUILD_MODES = {"apk", "module", "both"}
 VALID_CHANNELS = {"latest", "dev"}
+VALID_DPI = {"anydpi", "nodpi"}
 
 # Some third-party patches report a "compatible version" string that isn't a
 # clean app version number -- e.g. one real patches repo returned
@@ -73,6 +74,10 @@ class AppConfig:
     enabled: bool = True
     build_mode: str = "apk"
     architectures: list[str] = field(default_factory=lambda: ["universal"])
+    # None means "prefer anydpi/nodpi automatically". A numeric string such
+    # as "480" prefers a matching density (including 120-480dpi), then falls
+    # back to anydpi/nodpi.
+    dpi: str | None = None
     include_patches: list[str] = field(default_factory=list)
     exclude_patches: list[str] = field(default_factory=list)
     module: ModuleConfig | None = None
@@ -117,6 +122,22 @@ def _validate_regex(pattern: str, ctx: str) -> str:
     return pattern
 
 
+def _validate_dpi(value: object, ctx: str) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, (str, int)) or isinstance(value, bool):
+        raise ConfigError(f"{ctx}: dpi must be a positive integer or 'anydpi'/'nodpi'")
+    normalized = str(value).strip().lower()
+    if normalized in VALID_DPI:
+        return normalized
+    normalized = normalized.removesuffix("dpi")
+    if not normalized.isdigit() or int(normalized) <= 0:
+        raise ConfigError(
+            f"{ctx}: dpi must be a positive integer or 'anydpi'/'nodpi', got '{value}'"
+        )
+    return normalized
+
+
 def _build_source_config(raw: dict | None, base_defaults: dict, ctx: str) -> SourceConfig:
     raw = raw or {}
     merged = {**base_defaults, **raw}
@@ -142,6 +163,7 @@ def load_config(path: str | Path = "config.yml") -> list[AppConfig]:
     default_patches = defaults.get("patches", {}) or {}
     default_architectures = defaults.get("architectures", ["universal"])
     default_build_mode = defaults.get("build_mode", "apk")
+    default_dpi = defaults.get("dpi")
 
     apps_raw = raw.get("apps")
     if not apps_raw:
@@ -184,8 +206,15 @@ def load_config(path: str | Path = "config.yml") -> list[AppConfig]:
         architectures = app_raw.get("architectures", default_architectures)
         if not architectures:
             raise ConfigError(f"{ctx}: architectures must not be empty")
+        normalized_architectures: list[str] = []
         for arch in architectures:
-            _validate_choice(arch, VALID_ARCHITECTURES, f"{ctx}.architectures")
+            normalized_arch = _validate_choice(
+                str(arch), VALID_ARCHITECTURES, f"{ctx}.architectures"
+            )
+            if normalized_arch not in normalized_architectures:
+                normalized_architectures.append(normalized_arch)
+        architectures = normalized_architectures
+        dpi = _validate_dpi(app_raw.get("dpi", default_dpi), f"{ctx}.dpi")
 
         module_cfg = None
         module_raw = app_raw.get("module")
@@ -212,6 +241,7 @@ def load_config(path: str | Path = "config.yml") -> list[AppConfig]:
                 enabled=bool(app_raw.get("enabled", True)),
                 build_mode=build_mode,
                 architectures=list(architectures),
+                dpi=dpi,
                 include_patches=list(app_raw.get("include_patches", []) or []),
                 exclude_patches=list(app_raw.get("exclude_patches", []) or []),
                 module=module_cfg,

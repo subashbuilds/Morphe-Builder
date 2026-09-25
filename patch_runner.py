@@ -2,12 +2,10 @@
 
 Replaces the old Instagram-only build_variants.py. Notable design points:
 
-  1. Architecture handling uses the CLI's own `--striplibs` flag instead of
-     downloading a separate APKMirror variant per architecture. One bundle
-     download is patched multiple times (once per configured architecture),
-     each time stripping down to just that architecture's native libraries
-     -- confirmed via `patch --help` on the real CLI. Fewer network calls,
-     fewer chances for APKMirror scraping to fail partway through a run.
+  1. Architecture/DPI source selection happens in apkmirror.py. Each output
+     receives a source explicitly matched to its architecture, with universal
+     and neutral-DPI fallbacks. The CLI's `--striplibs` flag is still applied
+     as a safety net when a universal source backs a specific architecture.
 
   2. build_mode support (apk / module / both). Critically, the "apk" output
      and the "module" output are now patched SEPARATELY with different
@@ -68,6 +66,12 @@ def _run_patch_command(
     striplibs: str | None,
     force: bool,
 ) -> None:
+    # A previous candidate can leave a partial file behind when patching
+    # fails. Remove it first so a later version is never skipped by the CLI
+    # merely because its output path exists.
+    if os.path.exists(out_path):
+        os.remove(out_path)
+
     command = ["java", "-jar", cli_jar, "patch"]
 
     for pf in patches_files:
@@ -110,26 +114,33 @@ def build_all_outputs(
     app: AppConfig,
     cli_jar: str,
     patches_files: list[str],
-    downloaded_apk_path: str,
+    downloaded_apk_paths: dict[str, str],
     version: str,
     output_dir: str,
     force: bool = False,
 ) -> list[BuildOutput]:
     """Build every configured (architecture x apk/module) output for `app`.
 
-    `downloaded_apk_path` (the single APKMirror bundle download) is reused
-    as the patch INPUT for every architecture, and also as the source of
-    the stock split APKs bundled into any "module" output -- see
-    magisk_module.py.
+    Each architecture uses the APKMirror variant selected for it. A selected
+    universal fallback may be shared by multiple architecture keys; module
+    outputs use that same selection as stock install input.
     """
     os.makedirs(output_dir, exist_ok=True)
     outputs: list[BuildOutput] = []
 
+    dpi_label = ""
+    if app.dpi:
+        dpi_label = f"-{app.dpi}dpi" if app.dpi.isdigit() else f"-{app.dpi}"
+
     for arch in app.architectures:
+        downloaded_apk_path = downloaded_apk_paths.get(arch)
+        if downloaded_apk_path is None:
+            raise PatchFailedError(f"No APKMirror input was selected for {arch}")
         striplibs = None if arch == "universal" else arch
+        variant_label = f"{arch}{dpi_label}"
 
         if app.wants_apk:
-            apk_out = os.path.join(output_dir, f"{app.id}-v{version}-{arch}.apk")
+            apk_out = os.path.join(output_dir, f"{app.id}-v{version}-{variant_label}.apk")
             print(f"[{app.id}] Patching {arch} (apk) -> {apk_out}")
             _run_patch_command(
                 cli_jar=cli_jar,
@@ -148,7 +159,8 @@ def build_all_outputs(
 
             # Separate patch run, on purpose -- see MODULE_FORCED_EXCLUDES.
             module_payload = os.path.join(
-                output_dir, f".{app.id}-v{version}-{arch}-module-payload.apk"
+                output_dir,
+                f".{app.id}-v{version}-{variant_label}-module-payload.apk",
             )
             print(f"[{app.id}] Patching {arch} (module) -> {module_payload}")
             _run_patch_command(
@@ -163,7 +175,8 @@ def build_all_outputs(
             )
 
             module_out = os.path.join(
-                output_dir, f"{app.id}-v{version}-{arch}-module.zip"
+                output_dir,
+                f"{app.id}-v{version}-{variant_label}-module.zip",
             )
             print(f"[{app.id}] Building Magisk/KernelSU module -> {module_out}")
             try:

@@ -7,11 +7,11 @@ Reads config.yml, and for every enabled app:
   2. Asks the CLI itself which app version(s) its patches currently support
      best (version_resolver.py), falling back to APKMirror's own version
      listing only if the patches place no restriction on version.
-  3. Tries those candidate versions newest-first: downloads ONE combined
-     bundle from APKMirror, and if that specific upload/build fails for any
-     reason, moves on to the next candidate instead of failing the run.
-  4. Builds every configured architecture x apk/module output from that one
-     download (patch_runner.py), and publishes a GitHub release tagged
+  3. Tries those candidate versions newest-first: selects the configured
+     architecture/DPI source from APKMirror, and if that upload/build fails
+     for any reason, moves on to the next candidate instead of failing the run.
+  4. Builds every configured architecture x apk/module output from its selected
+     source (patch_runner.py), and publishes a GitHub release tagged
      '<app-id>-<version>'.
 
 Usage:
@@ -27,6 +27,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import os
 import re
 import traceback
@@ -79,6 +80,12 @@ def _already_released_versions(repo: str, app: AppConfig) -> dict[str, "github.G
 
 
 _RECORDED_PATCHES_TAG = re.compile(r"^Patches:\s+\S+\s+(\S+)\s+\(channel:", re.MULTILINE)
+_RECORDED_VARIANTS = re.compile(r"^APKMirror variants:\s+(.+)$", re.MULTILINE)
+
+
+def _variant_signature(app: AppConfig) -> str:
+    dpi = f"{app.dpi}dpi" if app.dpi and app.dpi.isdigit() else (app.dpi or "auto")
+    return "; ".join(f"{arch}@{dpi}" for arch in app.architectures)
 
 
 def _recorded_patches_tag(release: "github.GithubRelease") -> str | None:
@@ -148,6 +155,7 @@ def build_app(
         return None
 
     already_released = {} if force else _already_released_versions(repo, app)
+    variant_signature = _variant_signature(app)
 
     output_dir = os.path.join(OUTPUT_DIR, app.id)
 
@@ -155,7 +163,12 @@ def build_app(
         existing_release = already_released.get(version)
         if existing_release is not None:
             recorded_tag = _recorded_patches_tag(existing_release)
-            if recorded_tag is None or recorded_tag == patches_tag:
+            variant_match = re.search(
+                _RECORDED_VARIANTS, existing_release.body or ""
+            )
+            recorded_variants = variant_match.group(1).strip() if variant_match else None
+            variants_changed = recorded_variants != variant_signature
+            if (recorded_tag is None or recorded_tag == patches_tag) and not variants_changed:
                 # BUGFIX: this used to pre-filter every already-released
                 # version out of the list and then happily attempt
                 # whatever was left -- which meant if the *best* candidate
@@ -177,24 +190,52 @@ def build_app(
             # this version needs rebuilding even though it was released
             # before -- publish_release() already knows how to overwrite an
             # existing tag, so this falls through to a normal build below.
-            print(f"[{app.id}] {version} was released with patches {recorded_tag}, "
-                  f"but {patches_tag} is now available -- rebuilding.")
+            reasons = []
+            if recorded_tag != patches_tag:
+                reasons.append(f"patches changed ({recorded_tag} -> {patches_tag})")
+            if variants_changed:
+                reasons.append(
+                    f"variant config changed ({recorded_variants or 'unknown'} -> {variant_signature})"
+                )
+            print(f"[{app.id}] Rebuilding {version}: {'; '.join(reasons)}.")
 
         print(f"[{app.id}] Attempting version {version}...")
         try:
             release_url = app.apkmirror_release_url(version)
-            bundle = apkmirror.get_bundle_variant(
-                release_url, session=session, preferred_architectures=app.architectures
-            )
+            variants = apkmirror.get_variants(release_url, session=session)
+            downloaded_paths: dict[str, str] = {}
+            path_by_link: dict[str, str] = {}
 
-            apk_path = os.path.join(BINS_DIR, "downloads", f"{app.id}-{version}.apkm")
-            apkmirror.download_apk(bundle, apk_path, session=session)
+            for arch in app.architectures:
+                variant = apkmirror.select_variant(
+                    variants,
+                    arch,
+                    dpi=app.dpi,
+                    prefer_bundle=app.wants_module,
+                    bundle_only=app.wants_module,
+                )
+                source_path = path_by_link.get(variant.link)
+                if source_path is None:
+                    digest = hashlib.sha256(variant.link.encode()).hexdigest()[:12]
+                    extension = "apkm" if variant.is_bundle else "apk"
+                    source_path = os.path.join(
+                        BINS_DIR,
+                        "downloads",
+                        f"{app.id}-{version}-{digest}.{extension}",
+                    )
+                    apkmirror.download_apk(variant, source_path, session=session)
+                    path_by_link[variant.link] = source_path
+                    size_mb = os.path.getsize(source_path) / (1024 * 1024)
+                    print(f"[{app.id}] Selected {variant.architecture}/{variant.dpi or 'unknown DPI'} ({size_mb:.1f} MiB).")
+                else:
+                    print(f"[{app.id}] Reusing selected {variant.architecture} source for {arch}.")
+                downloaded_paths[arch] = source_path
 
             outputs = build_all_outputs(
                 app=app,
                 cli_jar=cli_jar,
                 patches_files=[patches_path],
-                downloaded_apk_path=apk_path,
+                downloaded_apk_paths=downloaded_paths,
                 version=version,
                 output_dir=output_dir,
             )
@@ -263,7 +304,18 @@ def run(
 
             version, outputs, patches_tag, cli_tag = result
             tag = _release_tag(app, version)
-            files = [o.path for o in outputs]
+            variant_signature = _variant_signature(app)
+            arch_order = {arch: i for i, arch in enumerate(app.architectures)}
+            kind_order = {"apk": 0, "module": 1}
+            ordered_outputs = sorted(
+                outputs,
+                key=lambda output: (
+                    arch_order[output.architecture],
+                    kind_order[output.kind],
+                    output.path,
+                ),
+            )
+            files = [output.path for output in ordered_outputs]
 
             message = (
                 f"Automated {app.name} build.\n\n"
@@ -272,6 +324,7 @@ def run(
                 f"CLI: {app.cli.repo} {cli_tag or '(version unknown)'} "
                 f"(channel: {app.cli.channel})\n"
                 f"Architectures: {', '.join(app.architectures)}\n"
+                f"APKMirror variants: {variant_signature}\n"
                 f"Build mode: {app.build_mode}\n"
             )
 

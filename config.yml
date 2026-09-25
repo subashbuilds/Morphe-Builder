@@ -11,13 +11,11 @@
 #    is missing/blocked, it automatically falls back to the next best
 #    supported version instead of failing the whole run.
 #
-#  How architecture builds work:
-#    Only ONE file is downloaded from APKMirror per app per run (the combined
-#    "bundle" upload, e.g. .apkm, which contains every architecture). Each
-#    entry you list under `architectures` is then produced from that single
-#    download by asking the CLI to strip out the native libraries you don't
-#    want (`--striplibs`). This means adding more architectures does NOT mean
-#    more APKMirror scraping/downloads, which is where most breakage happens.
+#  How architecture/DPI builds work:
+#    Each output architecture is matched to its own APKMirror variant. A plain
+#    exact APK is preferred for normal APK builds (smaller), while module
+#    builds use a bundle so all stock splits remain available. A universal
+#    variant is used only when the requested architecture is unavailable.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -34,7 +32,14 @@ defaults:
   #                     works everywhere, no --striplibs applied)
   # You may list as many of these as you want; one output file is built per
   # entry.
-  architectures: ["arm64-v8a", "universal"]
+  # With no app-level override, build the universal APK.
+  architectures: ["universal"]
+
+  # Optional source DPI. Examples: 480, 480dpi, anydpi, or nodpi.
+  # If omitted, anydpi/nodpi is preferred automatically. If a requested DPI
+  # is unavailable, anydpi/nodpi is used; ranges such as 120-480dpi satisfy
+  # a request for 480.
+  dpi: null
 
   # What kind of output(s) to produce:
   #   "apk"    -> a normal, installable, self-signed APK (works everywhere,
@@ -155,8 +160,12 @@ apps:
       release_prefix: "gboard-the-google-keyboard"
     patches:
       repo: "jasonwu1994/Gboard-patches"
-    build_mode: "apk" 
+    build_mode: "apk"
     architectures: ["arm64-v8a"]
+    # Select the smallest current Gboard APK supporting 480dpi. The builder
+    # accepts APKMirror ranges such as 120-480dpi and falls back to a
+    # neutral-DPI variant if 480 is not published.
+    dpi: 480
     include_patches: []
     exclude_patches: []
 # -----------------------------------------------------------------------------

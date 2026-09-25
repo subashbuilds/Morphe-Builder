@@ -20,13 +20,13 @@ provably wrong are changed:
     the exact kind of thing that breaks silently after a small markup tweak.
   * "Failed to find X" cases now raise immediately with context instead of
     print()-ing and letting a `None` blow up a few lines later.
-  * Added get_bundle_variant(): we only need ONE variant per version now
-    (the combined .apkm bundle) because the CLI's --striplibs flag derives
-    every requested architecture from that single download. This removes
-    the old per-architecture scrape/download loop, which was the biggest
-    source of "worked for one arch, silently skipped another" failures.
+  * Variant selection is explicit: the configured architecture and optional
+    DPI are matched against APKMirror's columns, with universal/neutral-DPI
+    fallbacks. This avoids downloading an unrelated first row just because it
+    happened to appear first on the page.
 """
 
+import re
 from dataclasses import dataclass
 from typing import cast
 
@@ -46,6 +46,7 @@ class Variant:
     is_bundle: bool
     link: str
     architecture: str
+    dpi: str = ""
 
 
 class FailedToFindElement(Exception):
@@ -63,18 +64,63 @@ class FailedToFetch(Exception):
 
 
 def _text(tag: Tag | None) -> str | None:
-    """Safe replacement for the old `tag.string.strip()` pattern.
-
-    `.string` is None whenever a tag has anything other than exactly one
-    text-node child (e.g. a nested <span> or an inline ad comment), which is
-    common on APKMirror and was the cause of several latent crashes.
-    `.get_text(strip=True)` reliably returns the visible text regardless of
-    how deeply it's nested.
-    """
+    """Return visible text even when an APKMirror tag has nested children."""
     if tag is None:
         return None
     text = tag.get_text(strip=True)
     return text or None
+
+
+_KNOWN_ARCHITECTURES = (
+    "armeabi-v7a",
+    "arm64-v8a",
+    "universal",
+    "x86_64",
+    "x86",
+)
+_DPI_PATTERN = re.compile(
+    r"(?:\d{2,4}\s*-\s*)?\d{2,4}\s*dpi|anydpi|nodpi", re.IGNORECASE
+)
+
+
+def _normalize_architecture(value: str) -> str:
+    normalized = value.strip().lower()
+    compact = re.sub(r"[-_\s]+", "", normalized)
+    # Compare canonical tokens so x86_64 can never collapse into x86 while
+    # still accepting APKMirror's occasional x86-64 spelling.
+    for architecture in _KNOWN_ARCHITECTURES:
+        canonical = re.sub(r"[-_\s]+", "", architecture)
+        if canonical in compact:
+            return architecture
+    return normalized
+
+
+def _find_dpi(values: list[str]) -> str:
+    for value in values:
+        match = _DPI_PATTERN.search(value)
+        if match:
+            return match.group(0).replace(" ", "").lower()
+    return ""
+
+
+def _is_neutral_dpi(value: str) -> bool:
+    normalized = value.lower()
+    return "anydpi" in normalized or "nodpi" in normalized
+
+
+def _dpi_matches_requested(value: str, requested: str | None) -> bool:
+    if not requested:
+        return False
+    if requested in {"anydpi", "nodpi"}:
+        return _is_neutral_dpi(value)
+
+    wanted = int(requested)
+    numbers = [int(number) for number in re.findall(r"\d+", value)]
+    if not numbers:
+        return False
+    # APKMirror commonly uses ranges such as "120-480dpi". A requested 480
+    # is supported by that bundle, so do not discard it as an inexact match.
+    return min(numbers) <= wanted <= max(numbers)
 
 
 def get_versions(listing_url: str, session: FlareSolverrSession) -> list[Version]:
@@ -139,96 +185,119 @@ def get_variants(release_url: str, session: FlareSolverrSession) -> list[Variant
         is_bundle_tag = row.find("span", attrs={"class": "apkm-badge"})
         is_bundle = (_text(is_bundle_tag) or "").upper() == "BUNDLE"
 
-        # cells[1] is the Architecture column -- confirmed against a live
-        # APKMirror release page (columns are Variant/Arch/Version/DPI).
-        architecture = _text(cells[1]) if len(cells) > 1 else None
-        architecture = architecture or "unknown"
+        cell_texts = [_text(cell) or "" for cell in cells]
+        architecture_text = cell_texts[1] if len(cell_texts) > 1 else ""
+        architecture = _normalize_architecture(architecture_text) or "unknown"
+        dpi = _find_dpi(cell_texts[2:])
 
         link = f"https://www.apkmirror.com{link_element.attrs['href']}"
         variants.append(
-            Variant(is_bundle=is_bundle, link=link, architecture=architecture)
+            Variant(
+                is_bundle=is_bundle,
+                link=link,
+                architecture=architecture,
+                dpi=dpi,
+            )
         )
 
     return variants
+
+
+def _dpi_rank(variant: Variant, requested_dpi: str | None) -> int:
+    if requested_dpi:
+        if _dpi_matches_requested(variant.dpi, requested_dpi):
+            return 0
+        if _is_neutral_dpi(variant.dpi):
+            return 1
+        return 2
+
+    # With no DPI configured, prefer anydpi/nodpi, but keep a density-specific
+    # same-architecture APK as a last resort so niche apps still build.
+    return 0 if _is_neutral_dpi(variant.dpi) else 1
+
+
+def select_variant(
+    variants: list[Variant],
+    architecture: str,
+    dpi: str | None = None,
+    *,
+    prefer_bundle: bool = False,
+    bundle_only: bool = False,
+) -> Variant:
+    """Select the smallest safe APKMirror input for one configured output.
+
+    Preference order for a specific architecture is exact architecture + best
+    DPI, then a universal fallback. A requested numeric DPI also matches a
+    range (for example 120-480dpi satisfies 480), and falls back to
+    anydpi/nodpi. For APK-only builds, a plain exact APK is preferred over a
+    bundle because it avoids carrying unrelated density/native splits.
+    Module builds require a bundle so the stock install can remain complete.
+    """
+    wanted_arch = _normalize_architecture(architecture)
+    available = [v for v in variants if not bundle_only or v.is_bundle]
+    exact = [v for v in available if v.architecture == wanted_arch]
+    universal = [v for v in available if v.architecture == "universal"]
+    candidates = exact if wanted_arch == "universal" else exact + universal
+
+    if not candidates:
+        raise FailedToFindElement(
+            f"{architecture} or universal downloadable variant"
+        )
+
+    def rank(variant: Variant) -> tuple[int, int]:
+        is_exact = variant.architecture == wanted_arch
+        is_universal = variant.architecture == "universal"
+        if dpi:
+            if is_exact and _dpi_matches_requested(variant.dpi, dpi):
+                match_rank = 0
+            elif is_exact and _is_neutral_dpi(variant.dpi):
+                match_rank = 1
+            elif is_universal and _dpi_matches_requested(variant.dpi, dpi):
+                match_rank = 2
+            elif is_universal and _is_neutral_dpi(variant.dpi):
+                match_rank = 3
+            elif is_exact:
+                match_rank = 4
+            else:
+                match_rank = 5
+        else:
+            if is_exact and _is_neutral_dpi(variant.dpi):
+                match_rank = 0
+            elif is_universal and _is_neutral_dpi(variant.dpi):
+                match_rank = 1
+            elif is_exact:
+                match_rank = 2
+            else:
+                match_rank = 3
+        format_rank = 0 if variant.is_bundle == prefer_bundle else 1
+        return match_rank, format_rank
+
+    selected = min(candidates, key=rank)
+    if selected.architecture != wanted_arch:
+        print(
+            f"No {wanted_arch} variant is available; using universal instead."
+        )
+    if _dpi_rank(selected, dpi) > 0:
+        requested = dpi or "anydpi/nodpi"
+        print(
+            f"No exact {requested} variant is available for {wanted_arch}; "
+            f"using {selected.dpi or 'the available density'}."
+        )
+    return selected
 
 
 def get_bundle_variant(
     release_url: str,
     session: FlareSolverrSession,
     preferred_architectures: list[str] | None = None,
+    dpi: str | None = None,
 ) -> Variant:
-    """Get the single combined "bundle" (.apkm) variant for a release.
-
-    A release page usually lists SEVERAL bundle variants: one "universal"
-    bundle containing every architecture's native-lib split plus every
-    density/language split, and separate narrower bundles that only contain
-    ONE architecture's native-lib split (to save size). We specifically want
-    the "universal" one:
-
-      * It's the only one guaranteed to contain every architecture, which
-        --striplibs derives every requested output from (see
-        patch_runner.py) -- picking a narrower bundle by accident would
-        silently produce incomplete non-"universal" outputs.
-      * A narrower bundle can also be missing density/resource-config
-        splits that are present in the universal bundle, which can surface
-        as resource lookups returning null/failing at runtime in the
-        patched app (e.g. "R.color.<name> is null") depending on exactly
-        which config splits the narrower bundle happened to include.
-
-    BUGFIX: the previous version just took the first `is_bundle` row on the
-    page, which is document order, not "most complete" -- on pages that list
-    an architecture-specific bundle before the universal one, this could
-    silently download the narrower bundle instead.
-
-    BUGFIX: some apps (e.g. Gboard) never publish a "universal" bundle at
-    all, only per-architecture ones. In that case, `preferred_architectures`
-    (pass the app's configured `architectures` list) is checked in the
-    order given, so the fallback picks a bundle that's actually one of the
-    architectures being built -- not just whatever happens to be listed
-    first on the page, which could be an architecture nobody asked for and
-    won't run on the device it's meant for.
-
-    Note: --striplibs can only narrow down libraries that are already
-    present in the source bundle, not add missing ones. If no universal
-    bundle exists and the source bundle only covers one non-universal
-    architecture, any OTHER requested architecture derived from it via
-    --striplibs will end up with no matching native libraries at all. List
-    your actual target architecture first in config.yml's `architectures`
-    so it's the one this fallback prefers.
-    """
+    """Compatibility wrapper returning one explicit architecture's bundle."""
+    architecture = (preferred_architectures or ["universal"])[0]
     variants = get_variants(release_url, session=session)
-    bundles = [v for v in variants if v.is_bundle]
-
-    universal = next((v for v in bundles if v.architecture.lower() == "universal"), None)
-    if universal is not None:
-        return universal
-
-    for arch in preferred_architectures or []:
-        if arch.lower() == "universal":
-            continue  # already checked above
-        match = next((v for v in bundles if v.architecture.lower() == arch.lower()), None)
-        if match is not None:
-            print(
-                f"No 'universal' bundle found on {release_url}; "
-                f"using the configured '{arch}' bundle instead."
-            )
-            return match
-
-    if bundles:
-        print(
-            f"Warning: no 'universal' bundle (or any configured architecture's "
-            f"bundle) found on {release_url}, falling back to a "
-            f"'{bundles[0].architecture}' bundle. Non-matching --striplibs "
-            "outputs may be incomplete."
-        )
-        return bundles[0]
-
-    # Very old/simple releases sometimes only ever had a single plain APK
-    # (no split configs, so no "BUNDLE" badge at all) -- fall back to it.
-    if variants:
-        return variants[0]
-
-    raise FailedToFindElement(f"any downloadable variant on {release_url}")
+    return select_variant(
+        variants, architecture, dpi=dpi, prefer_bundle=True, bundle_only=True
+    )
 
 
 def download_apk(variant: Variant, path: str, session: FlareSolverrSession) -> None:

@@ -6,7 +6,11 @@ import uuid
 import requests
 
 from constants import get_repo
-from github import get_last_build_version, get_release_by_tag
+from github import (
+    delete_release_asset,
+    get_last_build_version,
+    get_release_by_tag,
+)
 
 FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL", "http://localhost:8191")
 
@@ -246,33 +250,45 @@ def publish_release(
     last in a given run "wins" and misrepresents the others as stale. It's
     now opt-in per call; main.py leaves it off for multi-app runs.
 
-    BUGFIX: `gh release create` has no flag to overwrite an existing
-    release -- it just fails with "a release with the same tag name already
-    exists". main.py only ever calls this with a tag that already has a
-    release when `--force` is used (a deliberate rebuild), so in that case
-    we delete the old release first and recreate it, rather than failing an
-    otherwise-successful build right at the last step. The underlying git
-    tag is left alone -- `gh release create` reuses it fine.
+    Existing releases are updated in place: edit notes, upload assets with
+    `--clobber`, then remove stale assets. Deleting and recreating a release
+    changes its ordering metadata and can move an old app version to the top
+    of GitHub's global release list. Updating in place also ensures a changed
+    DPI/architecture filename removes the old oversized asset.
     """
     key = os.environ.get("GITHUB_TOKEN")
     if key is None:
         raise Exception("GITHUB_TOKEN is not set")
 
     if len(files) == 0:
-        raise Exception("Files should have atleast one item")
+        raise Exception("Files should have at least one item")
 
-    if get_release_by_tag(get_repo(), tag) is not None:
-        print(f"Release {tag} already exists, deleting it before recreating (--force rebuild)")
-        subprocess.run(
-            ["gh", "release", "delete", tag, "--yes"],
-            env=os.environ.copy(),
-            check=True,
-        )
+    repo = get_repo()
+    existing_release = get_release_by_tag(repo, tag)
+    if existing_release is not None:
+        print(f"Release {tag} already exists, updating it in place")
+        edit_command = [
+            "gh", "release", "edit", tag,
+            "--notes", message,
+            "--title", title,
+        ]
+        if mark_latest:
+            edit_command.append("--latest")
+        subprocess.run(edit_command, env=os.environ.copy(), check=True)
+
+        upload_command = ["gh", "release", "upload", tag, *files, "--clobber"]
+        subprocess.run(upload_command, env=os.environ.copy(), check=True)
+
+        desired_names = {os.path.basename(path) for path in files}
+        for asset in existing_release.assets:
+            if asset.name not in desired_names:
+                print(f"Removing stale release asset {asset.name}")
+                delete_release_asset(repo, asset.id)
+        return
 
     command = ["gh", "release", "create", tag, "--notes", message, "--title", title]
     if mark_latest:
         command.append("--latest")
 
     command.extend(files)
-
     subprocess.run(command, env=os.environ.copy(), check=True)

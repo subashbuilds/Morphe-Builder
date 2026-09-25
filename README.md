@@ -58,12 +58,17 @@ For every app marked `enabled: true` in [`config.yml`](./config.yml), the builde
    best, using the CLI's own `list-versions` command — no changelog
    scraping, no hardcoded version numbers. Versions are ranked by how many
    patches actually support them, with version number only as a tiebreaker.
-3. **Downloads one combined APK bundle** from APKMirror for that version.
-   If that specific version can't be downloaded, it automatically falls
+3. **Matches the configured architecture and optional DPI** against the
+   APKMirror variants for that version. It prefers the smallest plain APK
+   for normal builds, uses bundles when stock splits are needed for modules,
+   accepts density ranges such as `120-480dpi`, and falls back to
+   `anydpi`/`nodpi` when needed. A missing architecture falls back to
+   universal; an unrelated first row is never selected accidentally. If the
+   version can't be downloaded, it automatically falls
    back to the next-best supported version — but stops as soon as it hits a
    version that's already been released, rather than "falling through" to
    publish something older than what's already out.
-4. **Patches** the bundle once per configured architecture, producing a
+4. **Patches** the selected source once per configured architecture, producing a
    plain installable APK and/or a Magisk/KernelSU root module, depending on
    your config — built as two genuinely separate patch runs so the module
    never gets the "GmsCore support" patch, which is only meant for
@@ -95,7 +100,8 @@ into `defaults` (used by any app that doesn't override them) and a list of
 
 ```yaml
 defaults:
-  architectures: ["arm64-v8a", "universal"]
+  architectures: ["universal"] # used when an app has no architecture override
+  dpi: null # prefer anydpi/nodpi; or set 480, 480dpi, anydpi, nodpi
   build_mode: "apk"
   cli:
     repo: "MorpheApp/morphe-desktop"
@@ -117,6 +123,7 @@ apps:
       repo: "MorpheApp/morphe-patches"
     build_mode: "both"
     architectures: ["arm64-v8a", "armeabi-v7a", "universal"]
+    dpi: 480
     module:
       id: "morphe-youtube"
       author: "subashbuilds"
@@ -137,7 +144,8 @@ apps:
 | `patches.channel` | app/defaults | `"latest"` (stable releases only) or `"dev"` (include pre-releases). |
 | `cli.repo` / `cli.asset_regex` / `cli.channel` | app/defaults | Same idea, for the patcher CLI jar itself. Rarely needs overriding per app. |
 | `build_mode` | app/defaults | `"apk"`, `"module"`, or `"both"`. See [below](#the-module-build-mode). |
-| `architectures` | app/defaults | Any of `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, `universal`. One APKMirror download is reused for all of them. |
+| `architectures` | app/defaults | Any of `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, `universal`. Each output is matched to that architecture; an unavailable architecture falls back to universal. Duplicate entries are removed. |
+| `dpi` | app/defaults, optional | A positive DPI such as `480`/`480dpi`, or `anydpi`/`nodpi`. If omitted, neutral DPI is preferred. Numeric requests accept ranges like `120-480dpi`; unavailable values fall back to neutral DPI when published. |
 | `module.id` | app | Required when `build_mode` is `module`/`both`. Must be unique across modules installed on a device. |
 | `module.author` | app, optional | Shown as the module's author in Magisk/KernelSU. Defaults to a generic name if omitted. |
 | `include_patches` / `exclude_patches` | app | Patch names to force on/off, matching `list-patches` output exactly. Leave empty to use the patch bundle's own defaults. |
@@ -215,11 +223,10 @@ module` (or `both`) has this repo build one itself:
 4. The mount is re-applied automatically at every boot, since bind mounts
    don't survive a reboot on their own.
 
-Only `base.apk` and the relevant architecture's native-library split are
-bundled for the stock install step — not every language/density split the
-original upload contains — since none of that matters once the patched
-`base.apk` is mounted over it anyway. This keeps module size and build time
-down.
+Module inputs keep the complete self-consistent stock split set (including
+language and density splits) and remove only native libraries for other
+architectures. Dropping resource/language splits can make Android reject an
+upgrade with `INSTALL_FAILED_MISSING_SPLIT`, so they are intentionally kept.
 
 This is the same well-established technique used by tools like
 [j-hc/revanced-magisk-module](https://github.com/j-hc/revanced-magisk-module);
@@ -256,8 +263,8 @@ If running locally, export a personal access token as `GITHUB_TOKEN` to get
 the same higher rate limit.
 
 **A Magisk/KernelSU module fails to flash with an architecture error.**
-The module is built for one specific architecture (or "universal") — make
-sure you're flashing the variant that matches your device.
+The module is built for one specific architecture (or universal), so flash
+the variant that matches your device.
 
 **Telegram notifications aren't sending.**
 They're optional. If `TG_TOKEN` isn't set as a repo secret, that step is
@@ -268,8 +275,6 @@ skipped automatically and never fails the build.
 - [Morphe](https://github.com/MorpheApp) — the patcher this project drives.
 - [ReVanced](https://github.com/ReVanced) — the original patcher Morphe is
   based on.
-- [crimera/piko](https://github.com/crimera/piko) — third-party
-  Instagram/X patches used by the default config.
 - [j-hc](https://github.com/j-hc) — this build pipeline's general structure,
   and the idea behind the Magisk module's stock-install-then-mount
   technique, were inspired by j-hc's ReVanced/Morphe builder templates.

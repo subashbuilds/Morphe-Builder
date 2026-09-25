@@ -25,8 +25,10 @@ RETRY_BACKOFF_SECONDS = 3
 
 @dataclass
 class Asset:
+    id: int
     browser_download_url: str
     name: str
+    size: int = 0
 
 
 @dataclass
@@ -89,7 +91,12 @@ def github_get(url: str, params: dict | None = None) -> requests.Response:
 
 def _to_github_release(release: dict) -> GithubRelease:
     assets = [
-        Asset(browser_download_url=asset["browser_download_url"], name=asset["name"])
+        Asset(
+            id=asset["id"],
+            browser_download_url=asset["browser_download_url"],
+            name=asset["name"],
+            size=asset.get("size", 0),
+        )
         for asset in release["assets"]
     ]
 
@@ -110,6 +117,16 @@ def _fetch_release(url: str) -> GithubRelease | None:
 
     response.raise_for_status()
     return _to_github_release(response.json())
+
+
+def delete_release_asset(repo: str, asset_id: int) -> None:
+    """Delete one release asset without deleting/recreating the release."""
+    response = requests.delete(
+        f"https://api.github.com/repos/{repo}/releases/assets/{asset_id}",
+        headers=_auth_headers(),
+        timeout=REQUEST_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
 
 
 def get_release_by_tag(repo: str, tag: str) -> GithubRelease | None:
