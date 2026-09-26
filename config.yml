@@ -106,7 +106,7 @@ apps:
     # include_patches / exclude_patches: leave empty to use Morphe's own
     # defaults for this app. Names must match `list-patches` output exactly.
     include_patches: []
-    exclude_patches: []
+    exclude_patches: ["Custom branding"]
 
     # version: "21.04.223"                   # uncomment to pin an exact version
                                               # instead of auto-detecting one
@@ -126,7 +126,7 @@ apps:
       id: "morphe-youtube-music"
       author: "subashbuilds"
     include_patches: []
-    exclude_patches: []
+    exclude_patches: ["Custom branding"]
 
   - id: instagram
     enabled: true
