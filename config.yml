@@ -146,8 +146,8 @@ apps:
       asset_regex: '^patches.*\.mpp$'
     # Instagram/piko has no root "module" variant, only a normal APK.
     build_mode: "apk"
-    architectures: ["arm64-v8a", "universal"]
-    include_patches: ["Theme", "Export all activities"]
+    architectures: ["arm64-v8a"]
+    include_patches: []
     exclude_patches: []
 
   - id: gboard
