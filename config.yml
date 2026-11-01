@@ -142,9 +142,9 @@ apps:
       # Leave this unset for apps where both are the same (e.g. YouTube).
       release_prefix: "instagram"
     patches:
-      repo: "crimera/piko"                   # third-party patches, not MorpheApp's own
+      repo: "SysAdminDoc/HushGram"                   # third-party patches, not MorpheApp's own
       asset_regex: '^patches.*\.mpp$'
-    # Instagram/piko has no root "module" variant, only a normal APK.
+    # Instagram/Hushgram has no root "module" variant, only a normal APK.
     build_mode: "apk"
     architectures: ["arm64-v8a"]
     include_patches: []
