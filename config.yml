@@ -147,6 +147,7 @@ apps:
     # Instagram/Hushgram has no root "module" variant, only a normal APK.
     build_mode: "apk"
     architectures: ["arm64-v8a"]
+    dpi: 480
     include_patches: []
     exclude_patches: []
 
