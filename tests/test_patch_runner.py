@@ -89,11 +89,11 @@ class PatchRunnerTests(unittest.TestCase):
 
 
 class PatchRunnerBundleTests(unittest.TestCase):
-    """The Morphe CLI merges split containers itself. Passing it an unpacked
-    *directory* of splits fails in its ARSCLib patcher with
-    "java.io.FileNotFoundException: No such file: /tmp/morphe-splits-..."."""
+    """The Morphe CLI merges split containers itself, but needs an absolute
+    path (it symlinks the bundle into its temp dir), and an unpacked
+    directory of splits is rejected."""
 
-    def test_apkm_input_is_passed_to_cli_unchanged(self):
+    def test_relative_apkm_input_is_passed_to_cli_as_absolute_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             bundle = os.path.join(tmp, "app.apkm")
             with open(bundle, "wb") as f:
@@ -117,7 +117,7 @@ class PatchRunnerBundleTests(unittest.TestCase):
                 _run_patch_command(
                     cli_jar="cli.jar",
                     patches_files=["patches.mpp"],
-                    apk_path=bundle,
+                    apk_path=os.path.relpath(bundle),
                     out_path=out_path,
                     include_patches=None,
                     exclude_patches=None,
@@ -125,7 +125,10 @@ class PatchRunnerBundleTests(unittest.TestCase):
                     force=False,
                 )
 
-            self.assertEqual(seen["command"][-1], bundle)
+            # Absolute path: the CLI symlinks the bundle into its own temp dir,
+            # which dangles for a relative path.
+            self.assertTrue(os.path.isabs(seen["command"][-1]))
+            self.assertEqual(seen["command"][-1], os.path.abspath(bundle))
             self.assertIn("--striplibs=arm64-v8a", seen["command"])
 
 

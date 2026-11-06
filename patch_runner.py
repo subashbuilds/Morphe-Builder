@@ -94,13 +94,18 @@ def _run_patch_command(
 
     command.extend(["-o", out_path])
 
-    # Split APK bundles (.apkm/.apks/.xapk) are passed to the CLI as-is: the
-    # current Morphe CLI detects and merges split containers itself, and
-    # applies --striplibs afterwards. Do NOT unpack the bundle into a
-    # directory first -- the CLI's ARSCLib-based patcher opens its input with
-    # ApkModule.loadApkFile() and fails on a directory with
-    # "java.io.FileNotFoundException: No such file: /tmp/morphe-splits-...".
-    command.append(apk_path)
+    # Split APK bundles (.apkm/.apks/.xapk) go to the CLI as-is: it detects and
+    # merges them itself (applying --striplibs afterwards). Do NOT unpack the
+    # bundle into a directory -- the CLI treats a directory as an APK file and
+    # fails with "No such file: /tmp/morphe-splits-...".
+    #
+    # The input MUST be an absolute path. To merge, the CLI stages the bundle
+    # into its own temp dir (morphe-data/tmp/patching-<ts>/) as a *symlink* to
+    # the path it was given. A relative target such as
+    # "bins/downloads/x.apkm" is resolved relative to the symlink's directory,
+    # so the link dangles and the merger fails with
+    # "FileNotFoundException: No such directory: .../patching-<ts>/x.apkm".
+    command.append(os.path.abspath(apk_path))
 
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
