@@ -240,6 +240,40 @@ class VariantParsingTests(unittest.TestCase):
         self.assertEqual(variants[0].file_size, 140 * 1024**2)
         self.assertEqual(variants[0].split_count, 1)
 
+    def test_file_size_is_read_from_the_download_link_text(self):
+        # Regression: APKMirror puts the size in the download link text
+        # ("Download (278 MB)"), not in a table cell. Reading only the
+        # cells left every row at size 0, so the 278 MB exact-480dpi row
+        # kept winning over the 140 MB 320-480dpi one.
+        html = """
+        <div class="table">
+          <div class="table-row"><div class="table-cell">Variant</div></div>
+          <div class="table-row">
+            <div class="table-cell"><span class="apkm-badge">BUNDLE</span> APKM</div>
+            <div class="table-cell">arm64-v8a</div>
+            <div class="table-cell">Android 9.0+</div>
+            <div class="table-cell">480 dpi</div>
+            <a class="accent_color" href="/big.apkm">Download (278 MB)</a>
+          </div>
+          <div class="table-row">
+            <div class="table-cell"><span class="apkm-badge">BUNDLE</span> APKM</div>
+            <div class="table-cell">arm64-v8a</div>
+            <div class="table-cell">Android 9.0+</div>
+            <div class="table-cell">320-480 dpi</div>
+            <a class="accent_color" href="/small.apkm">Download (140 MB)</a>
+          </div>
+        </div>
+        """
+        response = Mock(status_code=200, content=html.encode())
+        with patch("apkmirror.flaresolverr_request", return_value=response):
+            variants = apkmirror.get_variants("https://example.test/release", session=None)
+
+        self.assertEqual(variants[0].file_size, 278 * 1024**2)
+        self.assertEqual(variants[1].file_size, 140 * 1024**2)
+        selected = apkmirror.select_variant(variants, "arm64-v8a", "480")
+        self.assertEqual(selected.dpi, "320-480dpi")
+        self.assertEqual(selected.file_size, 140 * 1024**2)
+
     def test_split_count_is_parsed_when_present(self):
         html = """
         <div class="table">

@@ -96,8 +96,10 @@ _DPI_PATTERN = re.compile(
     r"(?:\d{2,4}\s*-\s*)?\d{2,4}\s*dpi|anydpi|nodpi", re.IGNORECASE
 )
 # APKMirror shows sizes like "278 MB", "140.5 MB", "1.2 GB" or "850 KB".
+# No \b after the unit: get_text(strip=True) concatenates sibling nodes
+# without a separator, so a cell can read "278MB" or "278MB(10splits)".
 _SIZE_PATTERN = re.compile(
-    r"(\d+(?:\.\d+)?)\s*(KB|MB|GB)\b", re.IGNORECASE
+    r"(\d+(?:\.\d+)?)\s*(KB|MB|GB)(?![a-z])", re.IGNORECASE
 )
 _SIZE_MULTIPLIERS = {"kb": 1024, "mb": 1024**2, "gb": 1024**3}
 
@@ -129,6 +131,13 @@ def _find_file_size(values: list[str]) -> int:
     Returns 0 when the row states no size. The size cell is the most
     reliable "smallest upload" signal available without downloading, so
     selection compares it before falling back to split count.
+
+    The size is NOT in the variant table's own cells: APKMirror puts it
+    in the row's download link text (e.g. "Download (278 MB)"), so
+    callers must pass the link text in `values` too. Without it every
+    row reports 0 and selection silently falls back to split count --
+    which is why the 278 MB exact-480dpi row kept winning over the
+    140 MB 320-480dpi one.
     """
     for value in values:
         match = _SIZE_PATTERN.search(value)
@@ -289,7 +298,14 @@ def get_variants(release_url: str, session: FlareSolverrSession) -> list[Variant
         architecture = _normalize_architecture(architecture_text) or "unknown"
         dpi = _find_dpi(cell_texts[2:])
         split_count = _find_split_count(cell_texts)
-        file_size = _find_file_size(cell_texts)
+        # The advertised size lives in the download link's text
+        # ("Download (278 MB)"), not in a table cell -- include it, or
+        # every row reports size 0 and smallest-size selection never
+        # engages. The link text is also a split-count source.
+        link_text = _text(link_element) or ""
+        file_size = _find_file_size([*cell_texts, link_text])
+        if not split_count:
+            split_count = _find_split_count([link_text])
 
         link = f"https://www.apkmirror.com{link_element.attrs['href']}"
         variants.append(
@@ -390,6 +406,23 @@ def select_variant(
         )
 
     selected = min(candidates, key=rank)
+    # Never pick silently when the size signal is missing: if no
+    # candidate states a size, smallest-size selection cannot work and
+    # the pick falls back to split count -- say so loudly, with the
+    # candidates, so a wrong pick is diagnosable from the log.
+    if not any(v.file_size for v in candidates):
+        print(
+            "WARNING: APKMirror stated no file size for any candidate; "
+            "smallest-size selection is disabled and split count decides."
+        )
+        for variant in sorted(candidates, key=rank)[:8]:
+            print(
+                f"  candidate: {variant.architecture}/"
+                f"{variant.dpi or 'unknown DPI'} "
+                f"{_format_size(variant.file_size)} "
+                f"splits={variant.split_count or '?'} "
+                f"{'bundle' if variant.is_bundle else 'apk'}"
+            )
     if selected.architecture != wanted_arch:
         print(
             f"No {wanted_arch} variant is available; using universal instead."
