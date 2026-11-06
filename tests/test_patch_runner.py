@@ -1,9 +1,10 @@
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from config import AppConfig, SourceConfig
-from patch_runner import build_all_outputs
+from patch_runner import _run_patch_command, build_all_outputs
 
 
 class PatchRunnerTests(unittest.TestCase):
@@ -85,6 +86,61 @@ class PatchRunnerTests(unittest.TestCase):
             self.assertEqual(
                 patch_command.call_args_list[0].kwargs["exclude_patches"], ["Ads"]
             )
+
+
+class PatchRunnerBundleTests(unittest.TestCase):
+    """The Morphe CLI patcher expects a *directory* of split APKs, never an
+    .apkm ZIP container -- a real CI run failed with
+    "java.io.FileNotFoundException: No such directory: ...apkm"."""
+
+    def test_apkm_input_is_expanded_to_a_splits_directory(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = os.path.join(tmp, "app.apkm")
+            with zipfile.ZipFile(bundle, "w") as z:
+                z.writestr("base.apk", b"base")
+                z.writestr("split_config.arm64_v8a.apk", b"arm64")
+                z.writestr("split_config.x86_64.apk", b"x86")
+                z.writestr("split_config.xxhdpi.apk", b"dpi")
+            out_path = os.path.join(tmp, "out.apk")
+            open(out_path, "wb").write(b"patched")
+
+            seen = {}
+
+            def fake_run(command, capture_output, text):
+                seen["command"] = command
+                seen["input"] = command[-1]
+                seen["contents"] = sorted(os.listdir(command[-1]))
+
+                class Done:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+
+                return Done()
+
+            with patch("patch_runner.subprocess.run", side_effect=fake_run):
+                _run_patch_command(
+                    cli_jar="cli.jar",
+                    patches_files=["patches.mpp"],
+                    apk_path=bundle,
+                    out_path=out_path,
+                    include_patches=None,
+                    exclude_patches=None,
+                    striplibs="arm64-v8a",
+                    force=False,
+                )
+
+            self.assertNotEqual(seen["input"], bundle)
+            self.assertTrue(os.path.isdir(seen["input"]))
+            # Only this architecture's native-lib split is kept.
+            self.assertIn("base.apk", seen["contents"])
+            self.assertIn("split_config.arm64_v8a.apk", seen["contents"])
+            self.assertIn("split_config.xxhdpi.apk", seen["contents"])
+            self.assertNotIn("split_config.x86_64.apk", seen["contents"])
+            # The temporary splits directory is cleaned up afterwards.
+            self.assertFalse(os.path.exists(seen["input"]))
 
 
 if __name__ == "__main__":

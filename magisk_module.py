@@ -115,6 +115,12 @@ def _extract_stock_splits(bundle_path: str, architecture: str, dest_dir: str) ->
     return written
 
 
+# Public name: the patcher needs the same .apkm -> split-APK directory
+# expansion, because the Morphe CLI reads split bundles as a *directory*
+# (ApkBundle.loadApkDirectory) and cannot open an .apkm container itself.
+extract_bundle_splits = _extract_stock_splits
+
+
 # ---------------------------------------------------------------------------
 # Script templates. Kept short and readable rather than densely "clever" --
 # these run as /system/bin/sh (Android's ash-based shell), so no bashisms.
