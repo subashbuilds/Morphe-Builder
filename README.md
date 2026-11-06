@@ -60,11 +60,11 @@ For every app marked `enabled: true` in [`config.yml`](./config.yml), the builde
    scraping, no hardcoded version numbers. Versions are ranked by how many
    patches actually support them, with version number only as a tiebreaker.
 3. **Matches the configured architecture and optional DPI** against the
-   APKMirror variants for that version, then breaks ties by **split count**:
-   the row with the fewest splits wins, because fewer splits means a smaller
-   download and a smaller installed app. So for `dpi: 480` a 2-split
-   `480-640dpi` upload is chosen over a 10-split `480dpi` one, even though the
-   latter is the "exact" density. It prefers the smallest plain APK
+   APKMirror variants for that version, then picks the **smallest advertised
+   file size**: the smallest file is the smallest download and install. So
+   for `dpi: 480` a 140 MB `320-480dpi, 1 S` bundle is chosen over a 278 MB
+   exact `480dpi, 10 S` one, even though the latter is the "exact" density.
+   Rows with no stated size fall back to fewest splits. It prefers the smallest plain APK
    for normal builds, uses bundles when stock splits are needed for modules,
    accepts density ranges such as `120-480dpi`, and falls back to
    `anydpi`/`nodpi` when needed. A missing architecture falls back to
@@ -154,7 +154,7 @@ apps:
 | `cli.repo` / `cli.asset_regex` / `cli.channel` | app/defaults | Same idea, for the patcher CLI jar itself. Rarely needs overriding per app. |
 | `build_mode` | app/defaults | `"apk"`, `"module"`, or `"both"`. See [below](#the-module-build-mode). |
 | `architectures` | app/defaults | Any of `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, `universal`. Each output is matched to that architecture; an unavailable architecture falls back to universal. Duplicate entries are removed. |
-| `dpi` | app/defaults, optional | A positive DPI such as `480`/`480dpi`, or `anydpi`/`nodpi`. If omitted, neutral DPI is preferred. Numeric requests accept ranges like `120-480dpi`; unavailable values fall back to neutral DPI when published. Among rows using the requested density, the one with the **fewest splits** is chosen (smaller download/install), so `480` prefers a 2-split `480-640dpi` over a 10-split exact `480dpi`. |
+| `dpi` | app/defaults, optional | A positive DPI such as `480`/`480dpi`, or `anydpi`/`nodpi`. If omitted, neutral DPI is preferred. Numeric requests accept ranges like `120-480dpi`; unavailable values fall back to neutral DPI when published. Among rows using the requested density, the one with the **smallest advertised file size** is chosen (smaller download/install), so `480` prefers a 140 MB `320-480dpi, 1 S` bundle over a 278 MB exact `480dpi, 10 S` one; rows with no stated size fall back to fewest splits. |
 | `module.id` | app | Required when `build_mode` is `module`/`both`. Must be unique across modules installed on a device. |
 | `module.author` | app, optional | Shown as the module's author in Magisk/KernelSU. Defaults to a generic name if omitted. |
 | `include_patches` / `exclude_patches` | app | Patch names to force on/off, matching `list-patches` output exactly. Leave empty to use the patch bundle's own defaults. |

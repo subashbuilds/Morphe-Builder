@@ -5,13 +5,14 @@ import apkmirror
 
 
 class VariantSelectionTests(unittest.TestCase):
-    def variant(self, arch, dpi="nodpi", *, bundle=False, name="", splits=0):
+    def variant(self, arch, dpi="nodpi", *, bundle=False, name="", splits=0, size=0):
         return apkmirror.Variant(
             is_bundle=bundle,
             link=f"https://example.test/{name or arch}-{dpi}",
             architecture=arch,
             dpi=dpi,
             split_count=splits,
+            file_size=size,
         )
 
     def test_exact_numeric_dpi_is_preferred(self):
@@ -30,6 +31,34 @@ class VariantSelectionTests(unittest.TestCase):
         ]
         selected = apkmirror.select_variant(variants, "arm64-v8a", "480")
         self.assertEqual(selected.dpi, "120-480dpi")
+
+    def test_smallest_file_size_wins_over_exact_dpi_and_more_splits(self):
+        # The reported case: a 278 MB exact "480dpi, 10 S" bundle must lose
+        # to a 140 MB "320-480dpi, 1 S" bundle for dpi: 480.
+        variants = [
+            self.variant("arm64-v8a", "480dpi", splits=10, size=278 * 1024**2, name="big"),
+            self.variant("arm64-v8a", "320-480dpi", splits=1, size=140 * 1024**2, name="small"),
+        ]
+        selected = apkmirror.select_variant(variants, "arm64-v8a", "480")
+        self.assertEqual(selected.dpi, "320-480dpi")
+        self.assertEqual(selected.file_size, 140 * 1024**2)
+        self.assertEqual(selected.split_count, 1)
+
+    def test_smallest_file_size_wins_between_equal_arch_and_dpi(self):
+        variants = [
+            self.variant("arm64-v8a", "480dpi", size=278 * 1024**2, name="big"),
+            self.variant("arm64-v8a", "480dpi", size=140 * 1024**2, name="small"),
+        ]
+        selected = apkmirror.select_variant(variants, "arm64-v8a", "480")
+        self.assertEqual(selected.link, "https://example.test/small-480dpi")
+
+    def test_stated_size_beats_unstated_size(self):
+        variants = [
+            self.variant("arm64-v8a", "480dpi", size=0, name="unknown"),
+            self.variant("arm64-v8a", "480dpi", size=140 * 1024**2, name="known"),
+        ]
+        selected = apkmirror.select_variant(variants, "arm64-v8a", "480")
+        self.assertEqual(selected.link, "https://example.test/known-480dpi")
 
     def test_fewer_splits_wins_between_equal_arch_and_dpi(self):
         variants = [
@@ -187,6 +216,29 @@ class VariantParsingTests(unittest.TestCase):
         self.assertEqual(variants[0].dpi, "120-480dpi")
         self.assertTrue(variants[0].is_bundle)
         self.assertEqual(variants[0].split_count, 0)
+        self.assertEqual(variants[0].file_size, 0)
+
+    def test_file_size_is_parsed_when_present(self):
+        html = """
+        <div class="table">
+          <div class="table-row"><div class="table-cell">Variant</div></div>
+          <div class="table-row">
+            <div class="table-cell"><span class="apkm-badge">BUNDLE</span> APKM</div>
+            <div class="table-cell">arm64-v8a</div>
+            <div class="table-cell">Android 9.0+</div>
+            <div class="table-cell">320-480 dpi</div>
+            <div class="table-cell">140 MB</div>
+            <div class="table-cell">1 split</div>
+            <a class="accent_color" href="/download.apkm">Download</a>
+          </div>
+        </div>
+        """
+        response = Mock(status_code=200, content=html.encode())
+        with patch("apkmirror.flaresolverr_request", return_value=response):
+            variants = apkmirror.get_variants("https://example.test/release", session=None)
+
+        self.assertEqual(variants[0].file_size, 140 * 1024**2)
+        self.assertEqual(variants[0].split_count, 1)
 
     def test_split_count_is_parsed_when_present(self):
         html = """

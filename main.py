@@ -258,7 +258,7 @@ def build_app(
                     size_mb = os.path.getsize(source_path) / (1024 * 1024)
                     print(f"[{app.id}] Selected {variant.architecture}/{variant.dpi or 'unknown DPI'}"
                           f"{f' with {variant.split_count} split(s)' if variant.split_count else ''} "
-                          f"({size_mb:.1f} MiB).")
+                          f"({size_mb:.1f} MiB downloaded).")
                 else:
                     print(f"[{app.id}] Reusing selected {variant.architecture} source for {arch}.")
                 downloaded_paths[arch] = source_path

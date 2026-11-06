@@ -16,10 +16,11 @@
 #    Selection order: (1) a row using the requested density -- exact
 #    "480dpi" or a range containing it, e.g. "480-640dpi"/"360-480dpi" --
 #    beats anydpi/nodpi, which beats an unrelated density; (2) the requested
-#    architecture, then universal; (3) the row with the FEWEST splits wins,
-#    because fewer splits = smaller download and smaller installed app. So a
-#    2-split 480-640dpi upload is chosen over a 10-split exact 480dpi one.
-#    Equal split counts then prefer an exact DPI, then the plain APK (or
+#    architecture, then universal; (3) the row with the SMALLEST advertised
+#    file size wins, because the smallest file = smallest download and
+#    install. So a 140 MB "320-480dpi, 1 S" bundle is chosen over a 278 MB
+#    exact "480dpi, 10 S" one. Rows with no stated size fall back to fewest
+#    splits; equal sizes then prefer an exact DPI, then the plain APK (or
 #    bundle, for module builds), then the narrowest density range.
 #
 #  Multiple patch sources:
@@ -52,7 +53,8 @@ defaults:
   # Optional source DPI. Examples: 480, 480dpi, anydpi, or nodpi.
   # If omitted, anydpi/nodpi is preferred automatically. A request for 480
   # narrows the choice to rows using 480 (exact "480dpi" or a range such as
-  # "480-640dpi"), then picks the one with the fewest splits = smallest size.
+  # "480-640dpi"), then picks the one with the smallest advertised file
+  # size (fewest splits as fallback) = smallest download/install.
   dpi: null
 
   # What kind of output(s) to produce:
@@ -177,7 +179,9 @@ apps:
     architectures: ["arm64-v8a"]
     # 480dpi: only rows using 480dpi are considered (exact "480dpi" or a
     # range such as 480-640dpi / 360-480dpi); among those the variant with
-    # the fewest splits (smallest download/install) is chosen.
+    # the smallest advertised file size (smallest download/install) is
+    # chosen, e.g. a 140 MB "320-480dpi, 1 S" bundle over a 278 MB
+    # "480dpi, 10 S" one.
     dpi: 480
     # include_patches / exclude_patches: leave empty to use the patches' own
     # defaults for this app. Names must match `list-patches` output exactly.

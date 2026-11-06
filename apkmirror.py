@@ -53,6 +53,13 @@ class Variant:
     # the fewest splits -- e.g. an "arm64-v8a 480dpi, 2 splits" upload wins
     # over a "480-640dpi, 10 splits" one.
     split_count: int = 0
+    # Advertised download size in bytes (0 = not stated / not probed yet).
+    # This is the primary "smallest upload" signal: among rows matching the
+    # requested architecture and DPI (exact or a range containing it), the
+    # smallest file wins -- e.g. a 140 MB "320-480dpi, 1 S" bundle beats a
+    # 278 MB "480dpi, 10 S" one. Split count is only a fallback for rows
+    # whose size APKMirror does not state.
+    file_size: int = 0
 
 
 class FailedToFindElement(Exception):
@@ -88,6 +95,11 @@ _SPLIT_PATTERN = re.compile(r"(\d+)\s*split", re.IGNORECASE)
 _DPI_PATTERN = re.compile(
     r"(?:\d{2,4}\s*-\s*)?\d{2,4}\s*dpi|anydpi|nodpi", re.IGNORECASE
 )
+# APKMirror shows sizes like "278 MB", "140.5 MB", "1.2 GB" or "850 KB".
+_SIZE_PATTERN = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(KB|MB|GB)\b", re.IGNORECASE
+)
+_SIZE_MULTIPLIERS = {"kb": 1024, "mb": 1024**2, "gb": 1024**3}
 
 
 def _normalize_architecture(value: str) -> str:
@@ -109,6 +121,32 @@ def _find_split_count(values: list[str]) -> int:
         if match:
             return int(match.group(1))
     return 0
+
+
+def _find_file_size(values: list[str]) -> int:
+    """Read APKMirror's advertised download size ("278 MB") as bytes.
+
+    Returns 0 when the row states no size. The size cell is the most
+    reliable "smallest upload" signal available without downloading, so
+    selection compares it before falling back to split count.
+    """
+    for value in values:
+        match = _SIZE_PATTERN.search(value)
+        if match:
+            amount = float(match.group(1))
+            unit = match.group(2).lower()
+            return int(amount * _SIZE_MULTIPLIERS[unit])
+    return 0
+
+
+def _format_size(size_bytes: int) -> str:
+    if not size_bytes:
+        return "unknown size"
+    if size_bytes >= 1024**3:
+        return f"{size_bytes / 1024**3:.1f} GB"
+    if size_bytes >= 1024**2:
+        return f"{size_bytes / 1024**2:.1f} MB"
+    return f"{size_bytes / 1024:.0f} KB"
 
 
 def _find_dpi(values: list[str]) -> str:
@@ -251,6 +289,7 @@ def get_variants(release_url: str, session: FlareSolverrSession) -> list[Variant
         architecture = _normalize_architecture(architecture_text) or "unknown"
         dpi = _find_dpi(cell_texts[2:])
         split_count = _find_split_count(cell_texts)
+        file_size = _find_file_size(cell_texts)
 
         link = f"https://www.apkmirror.com{link_element.attrs['href']}"
         variants.append(
@@ -260,6 +299,7 @@ def get_variants(release_url: str, session: FlareSolverrSession) -> list[Variant
                 architecture=architecture,
                 dpi=dpi,
                 split_count=split_count,
+                file_size=file_size,
             )
         )
 
@@ -295,11 +335,13 @@ def select_variant(
        "480dpi", or a range containing it such as "480-640dpi" or
        "360-480dpi") beats anydpi/nodpi, which beats an unrelated density.
     2. Architecture -- the requested architecture wins, then "universal".
-    3. Smallest upload -- the row with the FEWEST splits wins (2 splits
-       beats 10 splits), because fewer splits means a smaller download and a
-       smaller installed app. Ties go to an exact DPI over a range, then to
-       the plain APK/bundle the build mode wants, then to the narrowest
-       density range.
+    3. Smallest upload -- the row with the smallest advertised file size
+       wins (a 140 MB "320-480dpi, 1 S" bundle beats a 278 MB "480dpi,
+       10 S" one), because the smallest file is the smallest download and
+       install. Rows with no stated size fall back to fewest splits
+       (2 splits beats 10 splits). Ties go to an exact DPI over a range,
+       then to the plain APK/bundle the build mode wants, then to the
+       narrowest density range.
     """
     wanted_arch = _normalize_architecture(architecture)
     candidates = [v for v in variants if not bundle_only or v.is_bundle]
@@ -320,22 +362,27 @@ def select_variant(
             return _dpi_compat(variant.dpi, dpi)
         return 0 if _is_neutral_dpi(variant.dpi) else 1
 
-    def rank(variant: Variant) -> tuple[int, int, int, int, int, int]:
+    def rank(variant: Variant) -> tuple[int, int, int, int, int, int, int]:
         # 1. Same density as requested (exact or range) > anydpi/nodpi >
         #    an unrelated density.
         # 2. The requested architecture > universal.
-        # 3. FEWEST splits wins: a 2-split "480-640dpi"/"360-480dpi" upload
-        #    is a smaller download and install than a 10-split exact
-        #    "480dpi" one. 0 = count not stated, ranked between 1 and 2.
+        # 3. SMALLEST advertised file size wins: a 140 MB "320-480dpi,
+        #    1 S" bundle is a smaller download and install than a 278 MB
+        #    "480dpi, 10 S" one. 0 = size not stated, ranked after every
+        #    stated size so an unstated row never beats a known-small one.
+        size_rank = variant.file_size if variant.file_size else float("inf")
+        # 4. Equal size (or no sizes stated): FEWEST splits wins, for the
+        #    same reason. 0 = count not stated, ranked between 1 and 2.
         split_rank = {0: 1}.get(variant.split_count, variant.split_count)
-        # 4. Equal splits: exact DPI > a range containing it.
+        # 5. Equal size and splits: exact DPI > a range containing it.
         quality = _dpi_match_rank(variant.dpi, dpi) if dpi else 0
-        # 5. Then the plain APK / bundle the build mode wants.
+        # 6. Then the plain APK / bundle the build mode wants.
         format_rank = 0 if variant.is_bundle == prefer_bundle else 1
-        # 6. Then the narrowest density range (smaller upload on ties).
+        # 7. Then the narrowest density range (smaller upload on ties).
         return (
             density_class(variant),
             arch_rank(variant),
+            size_rank,
             split_rank,
             quality,
             format_rank,
@@ -353,19 +400,22 @@ def select_variant(
             f"using {selected.dpi or 'the available density'}."
         )
         # Show what APKMirror actually listed, so a surprising pick is easy
-        # to explain: every fallback row is printed with its split count.
+        # to explain: every fallback row is printed with its size and
+        # split count.
         for variant in sorted(candidates, key=rank)[:8]:
             print(
                 f"  candidate: {variant.architecture}/"
                 f"{variant.dpi or 'unknown DPI'} "
+                f"{_format_size(variant.file_size)} "
                 f"splits={variant.split_count or '?'} "
                 f"{'bundle' if variant.is_bundle else 'apk'}"
             )
-    if selected.split_count:
-        print(
-            f"Selected the {selected.architecture}/{selected.dpi or 'unknown DPI'} "
-            f"variant with {selected.split_count} split(s) (smallest match)."
-        )
+    print(
+        f"Selected the {selected.architecture}/{selected.dpi or 'unknown DPI'} "
+        f"variant ({_format_size(selected.file_size)}"
+        f"{f', {selected.split_count} split(s)' if selected.split_count else ''}) "
+        f"(smallest match)."
+    )
     return selected
 
 
