@@ -21,14 +21,11 @@ Replaces the old Instagram-only build_variants.py. Notable design points:
 """
 
 import os
-import shutil
 import subprocess
-import tempfile
-import zipfile
 from dataclasses import dataclass
 
 from config import AppConfig
-from magisk_module import build_magisk_module, extract_bundle_splits
+from magisk_module import build_magisk_module
 
 KEYSTORE_ARGS = [
     # Re-use j-hc's well-known keystore so patched apps keep updating in
@@ -97,34 +94,15 @@ def _run_patch_command(
 
     command.extend(["-o", out_path])
 
-    # A split APK bundle (.apkm/.apks/.xapk) is a ZIP container: the CLI's
-    # patcher only understands a *directory* of split APKs
-    # (ApkBundle.loadApkDirectory) and fails on the container itself with
-    # "java.io.FileNotFoundException: No such directory: ...apkm" --
-    # confirmed from a real CI log. Expand it into a temp dir of splits
-    # first, keeping only this architecture's native-lib split, then hand
-    # the directory to the CLI.
-    bundle_dir = None
-    if apk_path.lower().endswith((".apkm", ".apks", ".xapk")):
-        bundle_dir = tempfile.mkdtemp(prefix="morphe-splits-")
-        try:
-            extract_bundle_splits(
-                apk_path,
-                "universal" if not striplibs else striplibs,
-                bundle_dir,
-            )
-        except Exception:
-            shutil.rmtree(bundle_dir, ignore_errors=True)
-            raise
-        command.append(bundle_dir)
-    else:
-        command.append(apk_path)
+    # Split APK bundles (.apkm/.apks/.xapk) are passed to the CLI as-is: the
+    # current Morphe CLI detects and merges split containers itself, and
+    # applies --striplibs afterwards. Do NOT unpack the bundle into a
+    # directory first -- the CLI's ARSCLib-based patcher opens its input with
+    # ApkModule.loadApkFile() and fails on a directory with
+    # "java.io.FileNotFoundException: No such file: /tmp/morphe-splits-...".
+    command.append(apk_path)
 
-    try:
-        result = subprocess.run(command, capture_output=True, text=True)
-    finally:
-        if bundle_dir:
-            shutil.rmtree(bundle_dir, ignore_errors=True)
+    result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
         raise PatchFailedError(
             f"Morphe CLI patch failed for {apk_path} "
