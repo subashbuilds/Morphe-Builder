@@ -37,6 +37,7 @@ but adding another app, or another developer's patches, is a config edit, not a 
 - [Configuring apps](#configuring-apps)
   - [Config reference](#config-reference)
   - [Adding a new app](#adding-a-new-app)
+  - [Multiple patch sources](#multiple-patch-sources)
 - [Workflows](#workflows)
 - [Running locally](#running-locally)
 - [The "module" build mode](#the-module-build-mode)
@@ -59,7 +60,11 @@ For every app marked `enabled: true` in [`config.yml`](./config.yml), the builde
    scraping, no hardcoded version numbers. Versions are ranked by how many
    patches actually support them, with version number only as a tiebreaker.
 3. **Matches the configured architecture and optional DPI** against the
-   APKMirror variants for that version. It prefers the smallest plain APK
+   APKMirror variants for that version, then breaks ties by **split count**:
+   the row with the fewest splits wins, because fewer splits means a smaller
+   download and a smaller installed app. So for `dpi: 480` a 2-split
+   `480-640dpi` upload is chosen over a 10-split `480dpi` one, even though the
+   latter is the "exact" density. It prefers the smallest plain APK
    for normal builds, uses bundles when stock splits are needed for modules,
    accepts density ranges such as `120-480dpi`, and falls back to
    `anydpi`/`nodpi` when needed. A missing architecture falls back to
@@ -73,6 +78,10 @@ For every app marked `enabled: true` in [`config.yml`](./config.yml), the builde
    your config — built as two genuinely separate patch runs so the module
    never gets the "GmsCore support" patch, which is only meant for
    non-rooted installs and actively conflicts with a root/mount install.
+   An app can list **several patch sources** (see
+   [Multiple patch sources](#multiple-patch-sources)); every listed bundle is
+   downloaded and passed to the same `patch` run, one `-p` each, so a single
+   app can be patched with two or more patch repos at once.
 5. **Publishes a GitHub release** per app and version, and does nothing at
    all once you're already up to date — so the daily schedule doesn't spam
    you with duplicate or redundant releases.
@@ -140,12 +149,12 @@ apps:
 | `apkmirror.org` | app | The `<org>` segment of `apkmirror.com/apk/<org>/<app>/`. |
 | `apkmirror.app` | app | The `<app>` segment of the same URL (the listing directory). |
 | `apkmirror.release_prefix` | app, optional | Only needed if an app's release-page URLs use a different prefix than its listing slug (Instagram is one such case — see the comment in `config.yml`). Defaults to `apkmirror.app`. |
-| `patches.repo` | app | `owner/repo` of the GitHub repo publishing the patches bundle. |
+| `patches.repo` | app | `owner/repo` of the GitHub repo publishing the patches bundle. May also be given as a **list** of sources — see [Multiple patch sources](#multiple-patch-sources). |
 | `patches.channel` | app/defaults | `"latest"` (stable releases only) or `"dev"` (include pre-releases). |
 | `cli.repo` / `cli.asset_regex` / `cli.channel` | app/defaults | Same idea, for the patcher CLI jar itself. Rarely needs overriding per app. |
 | `build_mode` | app/defaults | `"apk"`, `"module"`, or `"both"`. See [below](#the-module-build-mode). |
 | `architectures` | app/defaults | Any of `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86`, `universal`. Each output is matched to that architecture; an unavailable architecture falls back to universal. Duplicate entries are removed. |
-| `dpi` | app/defaults, optional | A positive DPI such as `480`/`480dpi`, or `anydpi`/`nodpi`. If omitted, neutral DPI is preferred. Numeric requests accept ranges like `120-480dpi`; unavailable values fall back to neutral DPI when published. |
+| `dpi` | app/defaults, optional | A positive DPI such as `480`/`480dpi`, or `anydpi`/`nodpi`. If omitted, neutral DPI is preferred. Numeric requests accept ranges like `120-480dpi`; unavailable values fall back to neutral DPI when published. Among rows using the requested density, the one with the **fewest splits** is chosen (smaller download/install), so `480` prefers a 2-split `480-640dpi` over a 10-split exact `480dpi`. |
 | `module.id` | app | Required when `build_mode` is `module`/`both`. Must be unique across modules installed on a device. |
 | `module.author` | app, optional | Shown as the module's author in Magisk/KernelSU. Defaults to a generic name if omitted. |
 | `include_patches` / `exclude_patches` | app | Patch names to force on/off, matching `list-patches` output exactly. Leave empty to use the patch bundle's own defaults. |
@@ -164,6 +173,38 @@ bottom of the file, and fill in:
   MorpheApp's own patches — any compatible developer's patches work.
 
 No Python code needs to change.
+
+### Multiple patch sources
+
+`patches:` normally names a single repo, but it also accepts a **list**.
+Every listed source is downloaded and applied **together in one patch run**
+(one `-p` per source, in order), so a single app can be patched with two or
+more patch repos at once. Sources are applied in order, so a later source can
+override a same-named patch from an earlier one:
+
+```yaml
+  - id: instagram
+    patches:
+      - repo: "SysAdminDoc/HushGram"
+        asset_regex: '^patches.*\.mpp$'
+      - repo: "somebody/instagram-extra-patches"
+        asset_regex: '^patches.*\.(mpp|rvp)$'
+```
+
+`include_patches` / `exclude_patches` still work as flat lists applied to
+every source, or as one list **per source** when you want to pick patches
+from each bundle individually (the per-source lists are unioned before the
+single `patch` run):
+
+```yaml
+    include_patches: [["Patch from source 1"], ["Patch from source 2"]]
+    exclude_patches: ["Ads"]           # a flat list applies to every source
+```
+
+Each source can also use a different `channel` and `asset_regex`; the build
+log and the release notes list every applied source with its own tag
+(`Patch source: owner/repo <tag> (channel: latest)`), and change detection
+treats *any* source moving to a new release as a reason to rebuild.
 
 ## Workflows
 

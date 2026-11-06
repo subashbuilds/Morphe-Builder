@@ -74,6 +74,9 @@ def _run_patch_command(
 
     command = ["java", "-jar", cli_jar, "patch"]
 
+    # One -p per configured patch source: several patch bundles can be
+    # applied to the same app in a single run. Order is preserved (primary
+    # source first) so a later source can override/refine an earlier one.
     for pf in patches_files:
         command.extend(["-p", pf])
 
@@ -105,9 +108,9 @@ def _run_patch_command(
         )
 
 
-def _module_excludes(app: AppConfig) -> list[str]:
+def _module_excludes(exclude_patches: list[str]) -> list[str]:
     # dict.fromkeys(...) dedupes while preserving order (no set needed).
-    return list(dict.fromkeys([*app.exclude_patches, *MODULE_FORCED_EXCLUDES]))
+    return list(dict.fromkeys([*exclude_patches, *MODULE_FORCED_EXCLUDES]))
 
 
 def build_all_outputs(
@@ -128,6 +131,10 @@ def build_all_outputs(
     os.makedirs(output_dir, exist_ok=True)
     outputs: list[BuildOutput] = []
 
+    # include/exclude_patches may be flat (apply to every source) or one list
+    # per patch source; merge them so the single patch run carries the union.
+    include_patches, exclude_patches = app.merged_patch_lists(len(patches_files))
+
     dpi_label = ""
     if app.dpi:
         dpi_label = f"-{app.dpi}dpi" if app.dpi.isdigit() else f"-{app.dpi}"
@@ -147,8 +154,8 @@ def build_all_outputs(
                 patches_files=patches_files,
                 apk_path=downloaded_apk_path,
                 out_path=apk_out,
-                include_patches=app.include_patches,
-                exclude_patches=app.exclude_patches,
+                include_patches=include_patches,
+                exclude_patches=exclude_patches,
                 striplibs=striplibs,
                 force=force,
             )
@@ -168,8 +175,8 @@ def build_all_outputs(
                 patches_files=patches_files,
                 apk_path=downloaded_apk_path,
                 out_path=module_payload,
-                include_patches=app.include_patches,
-                exclude_patches=_module_excludes(app),
+                include_patches=include_patches,
+                exclude_patches=_module_excludes(exclude_patches),
                 striplibs=striplibs,
                 force=force,
             )

@@ -12,10 +12,24 @@
 #    supported version instead of failing the whole run.
 #
 #  How architecture/DPI builds work:
-#    Each output architecture is matched to its own APKMirror variant. A plain
-#    exact APK is preferred for normal APK builds (smaller), while module
-#    builds use a bundle so all stock splits remain available. A universal
-#    variant is used only when the requested architecture is unavailable.
+#    Each output architecture is matched to its own APKMirror variant.
+#    Selection order: (1) a row using the requested density -- exact
+#    "480dpi" or a range containing it, e.g. "480-640dpi"/"360-480dpi" --
+#    beats anydpi/nodpi, which beats an unrelated density; (2) the requested
+#    architecture, then universal; (3) the row with the FEWEST splits wins,
+#    because fewer splits = smaller download and smaller installed app. So a
+#    2-split 480-640dpi upload is chosen over a 10-split exact 480dpi one.
+#    Equal split counts then prefer an exact DPI, then the plain APK (or
+#    bundle, for module builds), then the narrowest density range.
+#
+#  Multiple patch sources:
+#    An app's `patches:` key may be a LIST of patch sources instead of one
+#    mapping. All of them are downloaded and applied together in a single
+#    patch run (one -p per source, in order), so one app can be patched with
+#    two or more patch repos at once. Later sources can override same-named
+#    patches from earlier ones. include_patches/exclude_patches may stay a
+#    flat list of names (applied to every source) or become one list per
+#    source, e.g. include_patches: [["A"], ["B", "C"]].
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -36,9 +50,9 @@ defaults:
   architectures: ["universal"]
 
   # Optional source DPI. Examples: 480, 480dpi, anydpi, or nodpi.
-  # If omitted, anydpi/nodpi is preferred automatically. If a requested DPI
-  # is unavailable, anydpi/nodpi is used; ranges such as 120-480dpi satisfy
-  # a request for 480.
+  # If omitted, anydpi/nodpi is preferred automatically. A request for 480
+  # narrows the choice to rows using 480 (exact "480dpi" or a range such as
+  # "480-640dpi"), then picks the one with the fewest splits = smallest size.
   dpi: null
 
   # What kind of output(s) to produce:
@@ -144,10 +158,31 @@ apps:
     patches:
       repo: "SysAdminDoc/HushGram"                   # third-party patches, not MorpheApp's own
       asset_regex: '^patches.*\.mpp$'
+      # To patch this app with TWO OR MORE patch sources at once, make
+      #   patches:  a list instead of a single mapping, e.g.:
+      #   patches:
+      #     - repo: "SysAdminDoc/HushGram"
+      #       asset_regex: '^patches.*\.mpp$'
+      #     - repo: "somebody/instagram-patches"
+      #       asset_regex: '^patches.*\.(mpp|rvp)$'
+      # All listed sources are downloaded and applied together in ONE patch
+      # run (one -p per source, in order), so a single app can be patched
+      # with two or more patch repos at once; later sources can override
+      # same-named patches from earlier ones.
+      # include_patches/exclude_patches may also be one list PER source, e.g.
+      #   include_patches: [["Patch from source 1"], ["Patch from source 2"]]
+      # (per-source lists are unioned; a flat list applies to every source).
     # Instagram/Hushgram has no root "module" variant, only a normal APK.
     build_mode: "apk"
     architectures: ["arm64-v8a"]
+    # 480dpi: only rows using 480dpi are considered (exact "480dpi" or a
+    # range such as 480-640dpi / 360-480dpi); among those the variant with
+    # the fewest splits (smallest download/install) is chosen.
     dpi: 480
+    # include_patches / exclude_patches: leave empty to use the patches' own
+    # defaults for this app. Names must match `list-patches` output exactly.
+    # With several `patches:` sources, use one list per source instead of a
+    # flat list to pick patches from each bundle individually.
     include_patches: []
     exclude_patches: []
 

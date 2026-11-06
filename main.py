@@ -47,8 +47,10 @@ from version_resolver import ListVersionsError, get_supported_versions
 _download_cache: dict[tuple[str, str, str], tuple[str, str | None]] = {}
 
 
-def _cached_download(kind: str, source, out_subdir: str) -> tuple[str, str | None]:
-    key = (kind, source.repo, source.channel)
+def _cached_download(
+    kind: str, source, out_subdir: str, index: int = 0
+) -> tuple[str, str | None]:
+    key = (kind, source.repo, source.channel, index)
     if key in _download_cache:
         return _download_cache[key]
 
@@ -57,8 +59,9 @@ def _cached_download(kind: str, source, out_subdir: str) -> tuple[str, str | Non
         tag = download_cli(source, out_dir=out_dir)
         path = os.path.join(out_dir, "morphe-cli.jar")
     else:
-        tag = download_patches(source, out_dir=out_dir)
-        path = os.path.join(out_dir, "patches.mpp")
+        filename = "patches.mpp" if index == 0 else f"patches-{index}.mpp"
+        tag = download_patches(source, out_dir=out_dir, filename=filename)
+        path = os.path.join(out_dir, filename)
 
     _download_cache[key] = (path, tag)
     return path, tag
@@ -79,7 +82,12 @@ def _already_released_versions(repo: str, app: AppConfig) -> dict[str, "github.G
     }
 
 
-_RECORDED_PATCHES_TAG = re.compile(r"^Patches:\s+\S+\s+(\S+)\s+\(channel:", re.MULTILINE)
+# Matches both the old "Patches: <repo> <tag> (channel: ...)" line and the
+# current "Patches: <tag-or-tag+tag> (channel: ...)" line, so releases
+# published before multi-source support still yield a usable tag.
+_RECORDED_PATCHES_TAG = re.compile(
+    r"^Patches:\s+(?:\S+\s+)?(\S+)\s+\(channel:", re.MULTILINE
+)
 _RECORDED_VARIANTS = re.compile(r"^APKMirror variants:\s+(.+)$", re.MULTILINE)
 
 
@@ -101,13 +109,13 @@ def _recorded_patches_tag(release: "github.GithubRelease") -> str | None:
 
 
 def _resolve_candidate_versions(
-    app: AppConfig, cli_jar: str, patches_path: str, session: FlareSolverrSession
+    app: AppConfig, cli_jar: str, patches_paths: list[str], session: FlareSolverrSession
 ) -> list[str]:
     if app.pinned_version:
         return [app.pinned_version]
 
     try:
-        candidates = get_supported_versions(cli_jar, [patches_path], app.package_name)
+        candidates = get_supported_versions(cli_jar, patches_paths, app.package_name)
     except ListVersionsError as e:
         print(f"[{app.id}] list-versions failed, will fall back to APKMirror: {e}")
         candidates = []
@@ -130,19 +138,41 @@ def build_app(
     force: bool,
     version_override: str | None,
     check_only: bool,
-) -> tuple[str, list[BuildOutput], str | None, str | None] | None:
-    """Build one app. Returns (version, outputs, patches_tag, cli_tag) on success, None if skipped."""
+) -> tuple[str, list[BuildOutput], str, str | None, str] | None:
+    """Build one app.
+
+    Returns (version, outputs, patches_tag, cli_tag, patch_sources_note) on
+    success, None if skipped. `patches_tag` is a space-free join of every
+    applied patch source's tag (used for change detection); the note is the
+    human-readable "repo tag (channel: x)" lines written into release notes.
+    """
     print(f"\n=== {app.name} ({app.id}) ===")
 
     cli_jar, cli_tag = _cached_download("cli", app.cli, out_subdir=f"cli-{app.cli.repo.replace('/', '_')}")
-    patches_path, patches_tag = _cached_download(
-        "patches", app.patches, out_subdir=f"patches-{app.patches.repo.replace('/', '_')}"
-    )
+
+    # One patches file per configured patch source; all are applied together
+    # in a single patch run, so an app can combine two or more patch repos.
+    patches_tags: list[str] = []
+    patches_paths: list[str] = []
+    patches_sources_info: list[str] = []
+    for index, source in enumerate(app.patch_sources):
+        subdir = f"patches-{source.repo.replace('/', '_')}"
+        path, tag = _cached_download("patches", source, out_subdir=subdir, index=index)
+        patches_paths.append(path)
+        patches_tags.append(tag or "unknown")
+        patches_sources_info.append(
+            f"{source.repo} {tag or '(version unknown)'} (channel: {source.channel})"
+        )
+
+    # Space-free joined tag so the release-notes regex in main.py can read it
+    # back verbatim for change detection; the readable list goes on its own
+    # "Patch sources:" line.
+    patches_tag = "+".join(patches_tags)
 
     if version_override:
         candidates = [version_override]
     else:
-        candidates = _resolve_candidate_versions(app, cli_jar, patches_path, session)
+        candidates = _resolve_candidate_versions(app, cli_jar, patches_paths, session)
 
     if not candidates:
         print(f"[{app.id}] Could not determine any candidate version to build. Skipping.")
@@ -226,7 +256,9 @@ def build_app(
                     apkmirror.download_apk(variant, source_path, session=session)
                     path_by_link[variant.link] = source_path
                     size_mb = os.path.getsize(source_path) / (1024 * 1024)
-                    print(f"[{app.id}] Selected {variant.architecture}/{variant.dpi or 'unknown DPI'} ({size_mb:.1f} MiB).")
+                    print(f"[{app.id}] Selected {variant.architecture}/{variant.dpi or 'unknown DPI'}"
+                          f"{f' with {variant.split_count} split(s)' if variant.split_count else ''} "
+                          f"({size_mb:.1f} MiB).")
                 else:
                     print(f"[{app.id}] Reusing selected {variant.architecture} source for {arch}.")
                 downloaded_paths[arch] = source_path
@@ -234,13 +266,21 @@ def build_app(
             outputs = build_all_outputs(
                 app=app,
                 cli_jar=cli_jar,
-                patches_files=[patches_path],
+                patches_files=patches_paths,
                 downloaded_apk_paths=downloaded_paths,
                 version=version,
                 output_dir=output_dir,
             )
             print(f"[{app.id}] Successfully built {len(outputs)} output(s) for {version}.")
-            return version, outputs, patches_tag, cli_tag
+            return (
+                version,
+                outputs,
+                patches_tag,
+                cli_tag,
+                "".join(
+                    f"Patch source: {info}\n" for info in patches_sources_info
+                ),
+            )
 
         except (apkmirror.FailedToFetch, apkmirror.FailedToFindElement) as e:
             print(f"[{app.id}] APKMirror step failed for {version}: {e}. Trying next candidate.")
@@ -302,7 +342,7 @@ def run(
             if result is None:
                 continue
 
-            version, outputs, patches_tag, cli_tag = result
+            version, outputs, patches_tag, cli_tag, patch_sources_note = result
             tag = _release_tag(app, version)
             variant_signature = _variant_signature(app)
             arch_order = {arch: i for i, arch in enumerate(app.architectures)}
@@ -319,8 +359,8 @@ def run(
 
             message = (
                 f"Automated {app.name} build.\n\n"
-                f"Patches: {app.patches.repo} {patches_tag or '(version unknown)'} "
-                f"(channel: {app.patches.channel})\n"
+                f"Patches: {patches_tag} (channel: {app.patches.channel})\n"
+                f"{patch_sources_note}"
                 f"CLI: {app.cli.repo} {cli_tag or '(version unknown)'} "
                 f"(channel: {app.cli.channel})\n"
                 f"Architectures: {', '.join(app.architectures)}\n"

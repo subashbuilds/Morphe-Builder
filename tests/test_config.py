@@ -58,6 +58,25 @@ class ConfigTests(unittest.TestCase):
         config = BASE_CONFIG + '    architectures: ["arm64-v8a", "arm64-v8a"]\n'
         self.assertEqual(self.load(config)[0].architectures, ["arm64-v8a"])
 
+    def test_patches_can_list_multiple_sources(self):
+        extra = """    patches:
+      - repo: "owner/test-patches"
+        asset_regex: '^patches.*\\.mpp$'
+      - repo: "other/second-patches"
+        asset_regex: '^patches.*\\.rvp$'
+"""
+        config = BASE_CONFIG.rsplit("    patches:", 1)[0] + extra
+        app = self.load(config)[0]
+        self.assertEqual(app.patches.repo, "owner/test-patches")
+        self.assertEqual([s.repo for s in app.extra_patches], ["other/second-patches"])
+        self.assertEqual(
+            [s.repo for s in app.patch_sources],
+            ["owner/test-patches", "other/second-patches"],
+        )
+
+    def test_single_patches_mapping_has_no_extra_sources(self):
+        self.assertEqual(self.load(BASE_CONFIG)[0].extra_patches, [])
+
 
 if __name__ == "__main__":
     unittest.main()

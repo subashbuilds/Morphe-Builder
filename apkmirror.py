@@ -47,6 +47,12 @@ class Variant:
     link: str
     architecture: str
     dpi: str = ""
+    # How many "split APKs" APKMirror advertises for this row (0 = not
+    # stated). A smaller split count is a smaller download for the same
+    # architecture + DPI, so single-source APK builds prefer the row with
+    # the fewest splits -- e.g. an "arm64-v8a 480dpi, 2 splits" upload wins
+    # over a "480-640dpi, 10 splits" one.
+    split_count: int = 0
 
 
 class FailedToFindElement(Exception):
@@ -78,6 +84,7 @@ _KNOWN_ARCHITECTURES = (
     "x86_64",
     "x86",
 )
+_SPLIT_PATTERN = re.compile(r"(\d+)\s*split", re.IGNORECASE)
 _DPI_PATTERN = re.compile(
     r"(?:\d{2,4}\s*-\s*)?\d{2,4}\s*dpi|anydpi|nodpi", re.IGNORECASE
 )
@@ -95,6 +102,15 @@ def _normalize_architecture(value: str) -> str:
     return normalized
 
 
+def _find_split_count(values: list[str]) -> int:
+    """Read APKMirror's "(N splits)" note for a variant row, if present."""
+    for value in values:
+        match = _SPLIT_PATTERN.search(value)
+        if match:
+            return int(match.group(1))
+    return 0
+
+
 def _find_dpi(values: list[str]) -> str:
     for value in values:
         match = _DPI_PATTERN.search(value)
@@ -104,6 +120,51 @@ def _find_dpi(values: list[str]) -> str:
 
 
 def _is_neutral_dpi(value: str) -> bool:
+    normalized = value.lower()
+    return "anydpi" in normalized or "nodpi" in normalized
+
+
+def _dpi_match_rank(value: str, requested: str) -> int:
+    """How well `value` satisfies `requested`: 0 = exact, 1 = range, 2 = none.
+
+    Only a tiebreak, and only at EQUAL split counts: the split count decides
+    first (a 2-split "480-640dpi" row is a smaller download than a 10-split
+    exact "480dpi" row), so this merely prefers the exact density when the
+    two uploads are otherwise the same size.
+    """
+    if _is_any_dpi(value) or not value:
+        return 2
+    wanted = str(requested).strip().lower().removesuffix("dpi")
+    actual = value.strip().lower().removesuffix("dpi")
+    if actual == wanted:
+        return 0
+    return 1 if _dpi_matches_requested(value, requested) else 2
+
+
+def _dpi_compat(value: str, requested: str | None) -> int:
+    """Grouping used for culling, not ordering: 0 = same density as
+    requested (exact or a range containing it), 1 = neutral anydpi/nodpi,
+    2 = a density the request says nothing about."""
+    if not requested:
+        return 0 if _is_neutral_dpi(value) else 1
+    if _dpi_matches_requested(value, requested):
+        return 0
+    return 1 if _is_neutral_dpi(value) else 2
+
+
+def _dpi_width(value: str) -> int:
+    """Width of a density range ("360-480dpi" -> 120); 0 for a single value.
+
+    Used only to break ties: for the same split count, the narrower range
+    (e.g. 480-640dpi over 120-640dpi) is the smaller upload.
+    """
+    numbers = [int(number) for number in re.findall(r"\d+", value)]
+    if len(numbers) < 2:
+        return 0
+    return max(numbers) - min(numbers)
+
+
+def _is_any_dpi(value: str) -> bool:
     normalized = value.lower()
     return "anydpi" in normalized or "nodpi" in normalized
 
@@ -189,6 +250,7 @@ def get_variants(release_url: str, session: FlareSolverrSession) -> list[Variant
         architecture_text = cell_texts[1] if len(cell_texts) > 1 else ""
         architecture = _normalize_architecture(architecture_text) or "unknown"
         dpi = _find_dpi(cell_texts[2:])
+        split_count = _find_split_count(cell_texts)
 
         link = f"https://www.apkmirror.com{link_element.attrs['href']}"
         variants.append(
@@ -197,6 +259,7 @@ def get_variants(release_url: str, session: FlareSolverrSession) -> list[Variant
                 link=link,
                 architecture=architecture,
                 dpi=dpi,
+                split_count=split_count,
             )
         )
 
@@ -226,62 +289,82 @@ def select_variant(
 ) -> Variant:
     """Select the smallest safe APKMirror input for one configured output.
 
-    Preference order for a specific architecture is exact architecture + best
-    DPI, then a universal fallback. A requested numeric DPI also matches a
-    range (for example 120-480dpi satisfies 480), and falls back to
-    anydpi/nodpi. For APK-only builds, a plain exact APK is preferred over a
-    bundle because it avoids carrying unrelated density/native splits.
-    Module builds require a bundle so the stock install can remain complete.
+    Order of decisions:
+
+    1. Density class -- a row that uses the requested density (exact
+       "480dpi", or a range containing it such as "480-640dpi" or
+       "360-480dpi") beats anydpi/nodpi, which beats an unrelated density.
+    2. Architecture -- the requested architecture wins, then "universal".
+    3. Smallest upload -- the row with the FEWEST splits wins (2 splits
+       beats 10 splits), because fewer splits means a smaller download and a
+       smaller installed app. Ties go to an exact DPI over a range, then to
+       the plain APK/bundle the build mode wants, then to the narrowest
+       density range.
     """
     wanted_arch = _normalize_architecture(architecture)
-    available = [v for v in variants if not bundle_only or v.is_bundle]
-    exact = [v for v in available if v.architecture == wanted_arch]
-    universal = [v for v in available if v.architecture == "universal"]
-    candidates = exact if wanted_arch == "universal" else exact + universal
+    candidates = [v for v in variants if not bundle_only or v.is_bundle]
 
+    def arch_rank(variant: Variant) -> int:
+        if variant.architecture == wanted_arch:
+            return 0
+        return 1 if variant.architecture == "universal" else 2
+
+    candidates = [v for v in candidates if arch_rank(v) < 2]
     if not candidates:
         raise FailedToFindElement(
             f"{architecture} or universal downloadable variant"
         )
 
-    def rank(variant: Variant) -> tuple[int, int]:
-        is_exact = variant.architecture == wanted_arch
-        is_universal = variant.architecture == "universal"
+    def density_class(variant: Variant) -> int:
         if dpi:
-            if is_exact and _dpi_matches_requested(variant.dpi, dpi):
-                match_rank = 0
-            elif is_exact and _is_neutral_dpi(variant.dpi):
-                match_rank = 1
-            elif is_universal and _dpi_matches_requested(variant.dpi, dpi):
-                match_rank = 2
-            elif is_universal and _is_neutral_dpi(variant.dpi):
-                match_rank = 3
-            elif is_exact:
-                match_rank = 4
-            else:
-                match_rank = 5
-        else:
-            if is_exact and _is_neutral_dpi(variant.dpi):
-                match_rank = 0
-            elif is_universal and _is_neutral_dpi(variant.dpi):
-                match_rank = 1
-            elif is_exact:
-                match_rank = 2
-            else:
-                match_rank = 3
+            return _dpi_compat(variant.dpi, dpi)
+        return 0 if _is_neutral_dpi(variant.dpi) else 1
+
+    def rank(variant: Variant) -> tuple[int, int, int, int, int, int]:
+        # 1. Same density as requested (exact or range) > anydpi/nodpi >
+        #    an unrelated density.
+        # 2. The requested architecture > universal.
+        # 3. FEWEST splits wins: a 2-split "480-640dpi"/"360-480dpi" upload
+        #    is a smaller download and install than a 10-split exact
+        #    "480dpi" one. 0 = count not stated, ranked between 1 and 2.
+        split_rank = {0: 1}.get(variant.split_count, variant.split_count)
+        # 4. Equal splits: exact DPI > a range containing it.
+        quality = _dpi_match_rank(variant.dpi, dpi) if dpi else 0
+        # 5. Then the plain APK / bundle the build mode wants.
         format_rank = 0 if variant.is_bundle == prefer_bundle else 1
-        return match_rank, format_rank
+        # 6. Then the narrowest density range (smaller upload on ties).
+        return (
+            density_class(variant),
+            arch_rank(variant),
+            split_rank,
+            quality,
+            format_rank,
+            _dpi_width(variant.dpi),
+        )
 
     selected = min(candidates, key=rank)
     if selected.architecture != wanted_arch:
         print(
             f"No {wanted_arch} variant is available; using universal instead."
         )
-    if _dpi_rank(selected, dpi) > 0:
-        requested = dpi or "anydpi/nodpi"
+    if dpi and _dpi_match_rank(selected.dpi, dpi) > 0:
         print(
-            f"No exact {requested} variant is available for {wanted_arch}; "
+            f"No exact {dpi}dpi variant is available for {wanted_arch}; "
             f"using {selected.dpi or 'the available density'}."
+        )
+        # Show what APKMirror actually listed, so a surprising pick is easy
+        # to explain: every fallback row is printed with its split count.
+        for variant in sorted(candidates, key=rank)[:8]:
+            print(
+                f"  candidate: {variant.architecture}/"
+                f"{variant.dpi or 'unknown DPI'} "
+                f"splits={variant.split_count or '?'} "
+                f"{'bundle' if variant.is_bundle else 'apk'}"
+            )
+    if selected.split_count:
+        print(
+            f"Selected the {selected.architecture}/{selected.dpi or 'unknown DPI'} "
+            f"variant with {selected.split_count} split(s) (smallest match)."
         )
     return selected
 

@@ -93,7 +93,10 @@ def download_cli(source: SourceConfig, out_dir: str = "bins") -> str | None:
 
 
 def download_patches(
-    source: SourceConfig, out_dir: str = "bins", pinned_tag: str | None = None
+    source: SourceConfig,
+    out_dir: str = "bins",
+    pinned_tag: str | None = None,
+    filename: str = "patches.mpp",
 ) -> str | None:
     print(f"Downloading patches from {source.repo} (channel={source.channel})")
-    return download_github_asset(source, out_dir, "patches.mpp", pinned_tag=pinned_tag)
+    return download_github_asset(source, out_dir, filename, pinned_tag=pinned_tag)

@@ -5,12 +5,13 @@ import apkmirror
 
 
 class VariantSelectionTests(unittest.TestCase):
-    def variant(self, arch, dpi="nodpi", *, bundle=False, name=""):
+    def variant(self, arch, dpi="nodpi", *, bundle=False, name="", splits=0):
         return apkmirror.Variant(
             is_bundle=bundle,
             link=f"https://example.test/{name or arch}-{dpi}",
             architecture=arch,
             dpi=dpi,
+            split_count=splits,
         )
 
     def test_exact_numeric_dpi_is_preferred(self):
@@ -29,6 +30,57 @@ class VariantSelectionTests(unittest.TestCase):
         ]
         selected = apkmirror.select_variant(variants, "arm64-v8a", "480")
         self.assertEqual(selected.dpi, "120-480dpi")
+
+    def test_fewer_splits_wins_between_equal_arch_and_dpi(self):
+        variants = [
+            self.variant("arm64-v8a", "480dpi", splits=10, name="big"),
+            self.variant("arm64-v8a", "480dpi", splits=2, name="small"),
+        ]
+        selected = apkmirror.select_variant(variants, "arm64-v8a", "480")
+        self.assertEqual(selected.link, "https://example.test/small-480dpi")
+
+    def test_fewer_splits_wins_over_exact_dpi(self):
+        # The reported bug: the 10-split exact 480dpi upload was chosen even
+        # though a 2-split range upload (480-640dpi / 360-480dpi) is smaller.
+        variants = [
+            self.variant("arm64-v8a", "480dpi", splits=10, name="exact"),
+            self.variant("arm64-v8a", "480-640dpi", splits=2, name="range"),
+        ]
+        selected = apkmirror.select_variant(variants, "arm64-v8a", "480")
+        self.assertEqual(selected.dpi, "480-640dpi")
+        self.assertEqual(selected.split_count, 2)
+
+    def test_smallest_split_variant_wins_within_a_density_range(self):
+        variants = [
+            self.variant("arm64-v8a", "480-640dpi", splits=10, name="ten"),
+            self.variant("arm64-v8a", "480-640dpi", splits=2, name="two"),
+        ]
+        selected = apkmirror.select_variant(variants, "arm64-v8a", "480")
+        self.assertEqual(selected.split_count, 2)
+
+    def test_equal_splits_prefer_exact_dpi_over_range(self):
+        variants = [
+            self.variant("arm64-v8a", "480-640dpi", splits=2, name="range"),
+            self.variant("arm64-v8a", "480dpi", splits=2, name="exact"),
+        ]
+        selected = apkmirror.select_variant(variants, "arm64-v8a", "480")
+        self.assertEqual(selected.dpi, "480dpi")
+
+    def test_density_matching_rows_beat_neutral_dpi_even_with_more_splits(self):
+        variants = [
+            self.variant("arm64-v8a", "nodpi", splits=1, name="neutral"),
+            self.variant("arm64-v8a", "360-480dpi", splits=6, name="density"),
+        ]
+        selected = apkmirror.select_variant(variants, "arm64-v8a", "480")
+        self.assertEqual(selected.dpi, "360-480dpi")
+
+    def test_unknown_split_count_still_beats_many_splits(self):
+        variants = [
+            self.variant("arm64-v8a", "480dpi", splits=10, name="many"),
+            self.variant("arm64-v8a", "480dpi", splits=0, name="unknown"),
+        ]
+        selected = apkmirror.select_variant(variants, "arm64-v8a", "480")
+        self.assertEqual(selected.link, "https://example.test/unknown-480dpi")
 
     def test_unavailable_dpi_falls_back_to_neutral_dpi(self):
         variants = [
@@ -134,6 +186,27 @@ class VariantParsingTests(unittest.TestCase):
         self.assertEqual(variants[0].architecture, "arm64-v8a")
         self.assertEqual(variants[0].dpi, "120-480dpi")
         self.assertTrue(variants[0].is_bundle)
+        self.assertEqual(variants[0].split_count, 0)
+
+    def test_split_count_is_parsed_when_present(self):
+        html = """
+        <div class="table">
+          <div class="table-row"><div class="table-cell">Variant</div></div>
+          <div class="table-row">
+            <div class="table-cell">APK</div>
+            <div class="table-cell">arm64-v8a</div>
+            <div class="table-cell">Android 12L+</div>
+            <div class="table-cell">480 dpi</div>
+            <div class="table-cell">2 splits</div>
+            <a class="accent_color" href="/download.apk">Download</a>
+          </div>
+        </div>
+        """
+        response = Mock(status_code=200, content=html.encode())
+        with patch("apkmirror.flaresolverr_request", return_value=response):
+            variants = apkmirror.get_variants("https://example.test/release", session=None)
+
+        self.assertEqual(variants[0].split_count, 2)
 
 
 if __name__ == "__main__":

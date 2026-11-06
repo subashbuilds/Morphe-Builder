@@ -82,6 +82,62 @@ class AppConfig:
     exclude_patches: list[str] = field(default_factory=list)
     module: ModuleConfig | None = None
     pinned_version: str | None = None
+    # Additional patch sources applied together with `patches` in ONE patch
+    # run, so a single app can be patched with two or more patch sources
+    # (e.g. HushGram + a community bundle). Order matters: the Morphe CLI
+    # gets one -p per source, in this order, and later sources can override
+    # a patch of the same name from an earlier one.
+    extra_patches: list[SourceConfig] = field(default_factory=list)
+
+    @property
+    def patch_sources(self) -> list[SourceConfig]:
+        """Every patch bundle to pass to the CLI, primary source first."""
+        return [self.patches, *self.extra_patches]
+
+    def merged_patch_lists(
+        self, patch_source_count: int
+    ) -> tuple[list[str], list[str]]:
+        """Return (include, exclude) patch names for a patch run.
+
+        `self.include_patches` / `self.exclude_patches` may either be a flat
+        list of names (applied to every source) or a list of per-source
+        lists, one entry per configured patch source -- the latter lets one
+        app mix e.g. only HushGram's patches with only one patch from a
+        second bundle. Per-source entries are unioned in source order, so the
+        CLI receives a single -e/-d per unique name.
+        """
+        return (
+            self._merge_per_source(self.include_patches, patch_source_count),
+            self._merge_per_source(self.exclude_patches, patch_source_count),
+        )
+
+    @staticmethod
+    def _merge_per_source(values: list, patch_source_count: int) -> list[str]:
+        nested = any(isinstance(value, (list, tuple)) for value in values)
+        if not nested:
+            return list(dict.fromkeys(str(value) for value in values))
+
+        groups: list[list] = []
+        for value in values:
+            groups.append(list(value) if isinstance(value, (list, tuple)) else [value])
+        while len(groups) < patch_source_count:
+            groups.append([])
+
+        merged: list[str] = []
+        for group in groups:
+            for name in group:
+                text = str(name).strip()
+                if text and text not in merged:
+                    merged.append(text)
+        return merged
+
+    @property
+    def nested_patch_lists(self) -> bool:
+        """True when include/exclude_patches are given per patch source."""
+        return any(
+            isinstance(value, (list, tuple))
+            for value in [*self.include_patches, *self.exclude_patches]
+        )
 
     @property
     def wants_apk(self) -> bool:
@@ -136,6 +192,20 @@ def _validate_dpi(value: object, ctx: str) -> str | None:
             f"{ctx}: dpi must be a positive integer or 'anydpi'/'nodpi', got '{value}'"
         )
     return normalized
+
+
+def _build_source_configs(raw: object, base_defaults: dict, ctx: str) -> list[SourceConfig]:
+    """Accept either a single patch/cli source mapping or a list of them.
+
+    A list under an app's `patches:` key means "apply all of these patch
+    sources together to one app" (e.g. HushGram + another bundle).
+    """
+    if isinstance(raw, list):
+        return [
+            _build_source_config(item, base_defaults, f"{ctx}[{i}]")
+            for i, item in enumerate(raw)
+        ]
+    return [_build_source_config(raw, base_defaults, ctx)]
 
 
 def _build_source_config(raw: dict | None, base_defaults: dict, ctx: str) -> SourceConfig:
@@ -195,7 +265,7 @@ def load_config(path: str | Path = "config.yml") -> list[AppConfig]:
         apkmirror_release_prefix = str(apkmirror_raw.get("release_prefix", apkmirror_app))
 
         cli_cfg = _build_source_config(app_raw.get("cli"), default_cli, f"{ctx}.cli")
-        patches_cfg = _build_source_config(
+        patches_cfgs = _build_source_configs(
             app_raw.get("patches"), default_patches, f"{ctx}.patches"
         )
 
@@ -236,7 +306,8 @@ def load_config(path: str | Path = "config.yml") -> list[AppConfig]:
                 apkmirror_org=apkmirror_org,
                 apkmirror_app=apkmirror_app,
                 apkmirror_release_prefix=apkmirror_release_prefix,
-                patches=patches_cfg,
+                patches=patches_cfgs[0],
+                extra_patches=patches_cfgs[1:],
                 cli=cli_cfg,
                 enabled=bool(app_raw.get("enabled", True)),
                 build_mode=build_mode,
