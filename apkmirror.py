@@ -322,6 +322,97 @@ def get_variants(release_url: str, session: FlareSolverrSession) -> list[Variant
     return variants
 
 
+_BYTES_PATTERN = re.compile(r"\(\s*([\d,]{4,})\s*bytes?\s*\)", re.IGNORECASE)
+_FILE_SIZE_PATTERN = re.compile(
+    r"file\s*size\s*:?\s*(\d+(?:\.\d+)?)\s*(KB|MB|GB)(?![a-z])", re.IGNORECASE
+)
+
+
+def parse_variant_page_size(page: BeautifulSoup) -> int:
+    """Read a variant's real download size (bytes) from its own page.
+
+    The release page's variant table states NO size (confirmed from CI
+    logs: every candidate reported "unknown size"), so the size has to be
+    read from each variant's page. Sources, most precise first:
+      1. an exact byte count, "File size: 278.2 MB (291,737,613 bytes)"
+      2. the "File size: 278.2 MB" spec row
+      3. the download button text, "Download APK Bundle (278.2 MB)"
+    Returns 0 when none of them is found.
+    """
+    text = page.get_text(" ", strip=True)
+
+    match = _BYTES_PATTERN.search(text)
+    if match:
+        return int(match.group(1).replace(",", ""))
+
+    match = _FILE_SIZE_PATTERN.search(text)
+    if match:
+        return int(float(match.group(1)) * _SIZE_MULTIPLIERS[match.group(2).lower()])
+
+    button = page.find("a", attrs={"class": "downloadButton"})
+    if button is not None:
+        return _find_file_size([_text(button) or ""])
+    return 0
+
+
+# Upper bound on variant pages fetched per app/architecture. Release pages
+# list roughly 5-15 variants; this only guards against a pathological page.
+MAX_SIZE_PROBES = 16
+
+
+def populate_variant_sizes(
+    variants: list[Variant],
+    architecture: str,
+    dpi: str | None,
+    session: FlareSolverrSession,
+    *,
+    bundle_only: bool = False,
+) -> None:
+    """Fill in `file_size` for the variants that could actually be selected.
+
+    Only rows that survive the same architecture and density filtering that
+    select_variant() applies first are fetched -- a row that can never win
+    is not worth a request. Rows whose size is already known are skipped,
+    so a variant shared by several architectures is probed once. A failed
+    probe leaves that row at size 0 (ranked last among sized rows).
+    """
+    wanted_arch = _normalize_architecture(architecture)
+    candidates = [
+        v
+        for v in variants
+        if (not bundle_only or v.is_bundle)
+        and v.architecture in (wanted_arch, "universal")
+    ]
+    if not candidates:
+        return
+
+    def density_class(variant: Variant) -> int:
+        if dpi:
+            return _dpi_compat(variant.dpi, dpi)
+        return 0 if _is_neutral_dpi(variant.dpi) else 1
+
+    # Density class outranks size in select_variant(), so only the best
+    # density class present can ever be chosen.
+    best_class = min(density_class(v) for v in candidates)
+    to_probe = [
+        v for v in candidates if density_class(v) == best_class and not v.file_size
+    ][:MAX_SIZE_PROBES]
+
+    for variant in to_probe:
+        try:
+            response = flaresolverr_request(variant.link, session=session)
+            if response is None or response.status_code != 200:
+                raise FailedToFetch(variant.link)
+            variant.file_size = parse_variant_page_size(
+                BeautifulSoup(response.content, "html.parser")
+            )
+        except Exception as e:  # one bad probe must not fail the build
+            print(f"Could not read the size of {variant.link}: {e}")
+            continue
+        if not variant.file_size:
+            print(f"No file size found on {variant.link}")
+
+
 def _dpi_rank(variant: Variant, requested_dpi: str | None) -> int:
     if requested_dpi:
         if _dpi_matches_requested(variant.dpi, requested_dpi):

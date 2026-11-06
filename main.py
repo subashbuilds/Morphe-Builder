@@ -237,6 +237,16 @@ def build_app(
             path_by_link: dict[str, str] = {}
 
             for arch in app.architectures:
+                # The release page lists no file sizes, so read them from the
+                # candidate variants' own pages; otherwise "smallest size"
+                # selection never engages and the exact-DPI row always wins.
+                apkmirror.populate_variant_sizes(
+                    variants,
+                    arch,
+                    app.dpi,
+                    session=session,
+                    bundle_only=app.wants_module,
+                )
                 variant = apkmirror.select_variant(
                     variants,
                     arch,

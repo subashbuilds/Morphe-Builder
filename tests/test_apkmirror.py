@@ -295,5 +295,94 @@ class VariantParsingTests(unittest.TestCase):
         self.assertEqual(variants[0].split_count, 2)
 
 
+class VariantSizeProbeTests(unittest.TestCase):
+    def variant(self, dpi, name, *, bundle=True, arch="arm64-v8a"):
+        return apkmirror.Variant(
+            is_bundle=bundle,
+            link=f"https://example.test/{name}",
+            architecture=arch,
+            dpi=dpi,
+        )
+
+    @staticmethod
+    def page(body):
+        return f"<html><body>{body}</body></html>".encode()
+
+    def fake_requests(self, pages):
+        def fake(url, session=None, **kwargs):
+            return Mock(status_code=200, content=pages[url])
+
+        return fake
+
+    def test_size_is_read_from_exact_byte_count(self):
+        soup = apkmirror.BeautifulSoup(
+            self.page('<div>File size: 278.2 MB (291,737,613 bytes)</div>'),
+            "html.parser",
+        )
+        self.assertEqual(apkmirror.parse_variant_page_size(soup), 291737613)
+
+    def test_size_is_read_from_file_size_row_then_button(self):
+        row = apkmirror.BeautifulSoup(
+            self.page("<div>File size: 140 MB</div>"), "html.parser"
+        )
+        self.assertEqual(apkmirror.parse_variant_page_size(row), 140 * 1024**2)
+        button = apkmirror.BeautifulSoup(
+            self.page('<a class="downloadButton">Download APK Bundle (66.8 MB)</a>'),
+            "html.parser",
+        )
+        self.assertEqual(
+            apkmirror.parse_variant_page_size(button), int(66.8 * 1024**2)
+        )
+
+    def test_missing_size_is_zero(self):
+        soup = apkmirror.BeautifulSoup(self.page("<p>nothing</p>"), "html.parser")
+        self.assertEqual(apkmirror.parse_variant_page_size(soup), 0)
+
+    def test_probed_sizes_make_the_smaller_in_range_variant_win(self):
+        # Regression: the release page states no sizes, so selection fell
+        # back to "exact DPI wins" and always downloaded the 278 MB row.
+        exact = self.variant("480dpi", "exact")
+        small = self.variant("320-480dpi", "small")
+        wide = self.variant("480-640dpi", "wide")
+        neutral = self.variant("nodpi", "neutral")
+        pages = {
+            exact.link: self.page("File size: 278.2 MB (291,737,613 bytes)"),
+            small.link: self.page("File size: 140 MB (146,800,640 bytes)"),
+            wide.link: self.page("File size: 200 MB (209,715,200 bytes)"),
+            neutral.link: self.page("File size: 10 MB (10,485,760 bytes)"),
+        }
+        variants = [exact, small, wide, neutral]
+        fake = self.fake_requests(pages)
+        with patch("apkmirror.flaresolverr_request", side_effect=fake) as request:
+            apkmirror.populate_variant_sizes(
+                variants, "arm64-v8a", "480", session=None
+            )
+            # The neutral row can never beat a density match: not fetched.
+            fetched = [c.args[0] for c in request.call_args_list]
+            self.assertNotIn(neutral.link, fetched)
+
+        selected = apkmirror.select_variant(variants, "arm64-v8a", "480")
+        self.assertIs(selected, small)
+
+    def test_known_sizes_are_not_fetched_again(self):
+        known = self.variant("480dpi", "known")
+        known.file_size = 100
+        with patch("apkmirror.flaresolverr_request") as request:
+            apkmirror.populate_variant_sizes(
+                [known], "arm64-v8a", "480", session=None
+            )
+        request.assert_not_called()
+
+    def test_failed_probe_keeps_exact_dpi_fallback(self):
+        exact = self.variant("480dpi", "exact")
+        wide = self.variant("480-640dpi", "wide")
+        with patch("apkmirror.flaresolverr_request", side_effect=RuntimeError("boom")):
+            apkmirror.populate_variant_sizes(
+                [exact, wide], "arm64-v8a", "480", session=None
+            )
+        selected = apkmirror.select_variant([exact, wide], "arm64-v8a", "480")
+        self.assertIs(selected, exact)
+
+
 if __name__ == "__main__":
     unittest.main()
