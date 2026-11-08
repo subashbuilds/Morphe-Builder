@@ -473,7 +473,14 @@ class ChannelSelectionTests(unittest.TestCase):
     def row(self, channel, size, arch="arm64-v8a"):
         return apkmirror.Variant(
             is_bundle=False,
-            link=f"https://example.test/gboard-18-5-4-993608717-{channel}-{arch}-android-apk-download/",
+            # Every row lives under the release page's own "...-release/"
+            # path, so "release" is in the URL of beta rows too.
+            link=(
+                "https://example.test/apk/google-inc/gboard/"
+                "gboard-the-google-keyboard-18-5-4-993608717-release/"
+                f"gboard-the-google-keyboard-18-5-4-993608717-{channel}-{arch}"
+                "-android-apk-download/"
+            ),
             architecture=arch,
             dpi="nodpi",
             file_size=size,
@@ -499,6 +506,16 @@ class ChannelSelectionTests(unittest.TestCase):
             [beta, release], "arm64-v8a", "480", channel="release"
         )
         self.assertIs(selected, release)
+
+    def test_release_page_path_does_not_make_beta_rows_look_like_release(self):
+        # Regression: matching the whole URL made every row (beta included)
+        # look like a "release" row, so nothing was filtered and the smaller
+        # beta bundle won.
+        release = self.row("release", 120 * 1024**2)
+        beta = self.row("beta", 42 * 1024**2)
+        self.assertTrue(apkmirror._has_channel(release, "release"))
+        self.assertFalse(apkmirror._has_channel(beta, "release"))
+        self.assertTrue(beta.link.count("-release/") == 1)
 
     def test_beta_version_picks_beta(self):
         release = self.row("release", 100 * 1024**2)

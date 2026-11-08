@@ -162,11 +162,25 @@ def version_channel(version: str) -> str | None:
     return match.group(1).lower() if match else None
 
 
+def _url_slug(url: str) -> str:
+    """Last path segment of a variant URL, e.g.
+    "gboard-...-993608717-beta-arm64-v8a-android-apk-download".
+
+    NOT the whole URL: every variant of a release lives under the release
+    page's own path, ".../gboard-the-google-keyboard-18-5-4-993608717-release/",
+    so "release" appears in the full URL of every row, beta rows included.
+    Matching the whole URL made every row look like a release row.
+    """
+    return url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+
+
 def _has_channel(variant: "Variant", channel: str) -> bool:
     pattern = re.compile(
         rf"(?<![a-z0-9]){re.escape(channel)}(?![a-z0-9])", re.IGNORECASE
     )
-    return bool(pattern.search(variant.name) or pattern.search(variant.link))
+    return bool(
+        pattern.search(variant.name) or pattern.search(_url_slug(variant.link))
+    )
 
 
 def _narrow_to_channel(
@@ -382,7 +396,7 @@ def get_variants(release_url: str, session: FlareSolverrSession) -> list[Variant
         # Same-page stable/beta uploads differ only in their label, which can
         # appear in the link text, the first cell or the URL slug.
         name = link_text or (cell_texts[0] if cell_texts else "")
-        prerelease = _is_prerelease(link_text, href, *cell_texts)
+        prerelease = _is_prerelease(link_text, _url_slug(href), *cell_texts)
         variants.append(
             Variant(
                 is_bundle=is_bundle,
@@ -601,23 +615,21 @@ def select_variant(
         )
 
     selected = min(candidates, key=rank)
-    # Never pick silently when the size signal is missing: if no
-    # candidate states a size, smallest-size selection cannot work and
-    # the pick falls back to split count -- say so loudly, with the
-    # candidates, so a wrong pick is diagnosable from the log.
+    # Always show what was weighed (with each row's label) so a surprising
+    # pick can be diagnosed from the log alone.
     if not any(v.file_size for v in candidates):
         print(
-            "WARNING: APKMirror stated no file size for any candidate; "
-            "smallest-size selection is disabled and split count decides."
+            "WARNING: no candidate has a known file size; smallest-size "
+            "selection is disabled and split count decides."
         )
-        for variant in sorted(candidates, key=rank)[:8]:
-            print(
-                f"  candidate: {variant.architecture}/"
-                f"{variant.dpi or 'unknown DPI'} "
-                f"{_format_size(variant.file_size)} "
-                f"splits={variant.split_count or '?'} "
-                f"{'bundle' if variant.is_bundle else 'apk'}"
-            )
+    for variant in sorted(candidates, key=rank)[:8]:
+        print(
+            f"  candidate: {variant.name or '(unnamed)'} | "
+            f"{variant.architecture}/{variant.dpi or 'unknown DPI'} "
+            f"{_format_size(variant.file_size)} "
+            f"splits={variant.split_count or '?'} "
+            f"{'bundle' if variant.is_bundle else 'apk'}"
+        )
     if selected.architecture != wanted_arch:
         print(
             f"No {wanted_arch} variant is available; using universal instead."
@@ -627,19 +639,9 @@ def select_variant(
             f"No exact {dpi}dpi variant is available for {wanted_arch}; "
             f"using {selected.dpi or 'the available density'}."
         )
-        # Show what APKMirror actually listed, so a surprising pick is easy
-        # to explain: every fallback row is printed with its size and
-        # split count.
-        for variant in sorted(candidates, key=rank)[:8]:
-            print(
-                f"  candidate: {variant.architecture}/"
-                f"{variant.dpi or 'unknown DPI'} "
-                f"{_format_size(variant.file_size)} "
-                f"splits={variant.split_count or '?'} "
-                f"{'bundle' if variant.is_bundle else 'apk'}"
-            )
     print(
-        f"Selected the {selected.architecture}/{selected.dpi or 'unknown DPI'} "
+        f"Selected {selected.name or '(unnamed)'}: "
+        f"{selected.architecture}/{selected.dpi or 'unknown DPI'} "
         f"variant ({_format_size(selected.file_size)}"
         f"{f', {selected.split_count} split(s)' if selected.split_count else ''}) "
         f"(smallest match)."
