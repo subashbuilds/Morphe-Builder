@@ -60,6 +60,14 @@ class Variant:
     # 278 MB "480dpi, 10 S" one. Split count is only a fallback for rows
     # whose size APKMirror does not state.
     file_size: int = 0
+    # The row's own label, e.g. "18.5.4.993608717-release-arm64-v8a". One
+    # APKMirror release page can list stable ("release") and pre-release
+    # ("beta"/"alpha") uploads side by side with the same architecture and
+    # DPI, so the label is what tells them apart.
+    name: str = ""
+    # True for beta/alpha/dev/canary/nightly rows. Never chosen while a
+    # stable row for the same release exists.
+    prerelease: bool = False
 
 
 class FailedToFindElement(Exception):
@@ -114,6 +122,68 @@ def _normalize_architecture(value: str) -> str:
         if canonical in compact:
             return architecture
     return normalized
+
+
+_PRERELEASE_PATTERN = re.compile(
+    r"(?<![a-z0-9])(beta|alpha|dev|canary|nightly|preview)(?![a-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _is_prerelease(*values: str) -> bool:
+    """True when a row label / URL marks a beta, alpha, dev or canary build.
+
+    Boundaries are non-alphanumerics, so "gboard-...-beta-arm64-v8a" and
+    "18.5.4-beta" match while a name merely containing the letters does not.
+    """
+    return any(_PRERELEASE_PATTERN.search(value) for value in values if value)
+
+
+_CHANNEL_TOKENS = r"release|beta|alpha|dev|canary|nightly|preview"
+_VERSION_CHANNEL_PATTERN = re.compile(
+    rf"-({_CHANNEL_TOKENS})(?:-(?:arm64[-_]v8a|armeabi[-_]v7a|x86[-_]64|x86))?$",
+    re.IGNORECASE,
+)
+
+
+def version_channel(version: str) -> str | None:
+    """The release channel a patches-reported version names, if any.
+
+    Some patch sets report the app's full Android versionName, e.g.
+    "18.5.4.993608717-release-arm64-v8a" for Gboard. The "-release" /
+    "-beta" part is part of that version: APKMirror lists
+    "...-release-arm64-v8a" and "...-beta-arm64-v8a" as separate rows with
+    different versionNames, and the patches target only one of them.
+    Returns "release", "beta", ... (lowercase) or None for a plain version.
+    Only these known tokens are recognised, so versions such as X's
+    "12.7.1-release.0" are untouched.
+    """
+    match = _VERSION_CHANNEL_PATTERN.search(version.strip())
+    return match.group(1).lower() if match else None
+
+
+def _has_channel(variant: "Variant", channel: str) -> bool:
+    pattern = re.compile(
+        rf"(?<![a-z0-9]){re.escape(channel)}(?![a-z0-9])", re.IGNORECASE
+    )
+    return bool(pattern.search(variant.name) or pattern.search(variant.link))
+
+
+def _narrow_to_channel(
+    variants: list["Variant"], channel: str | None
+) -> list["Variant"]:
+    """Keep the rows of the channel the patches target.
+
+    With a channel ("release"), only rows labelled with it compete. When no
+    row carries that label (APKMirror did not tag the row) or no channel is
+    known, fall back to every row minus pre-releases (_drop_prereleases).
+    A pre-release channel that was explicitly requested ("beta") is honoured.
+    """
+    if channel:
+        matching = [v for v in variants if _has_channel(v, channel)]
+        if matching:
+            return matching
+    return _drop_prereleases(variants)
 
 
 def _find_split_count(values: list[str]) -> int:
@@ -307,7 +377,12 @@ def get_variants(release_url: str, session: FlareSolverrSession) -> list[Variant
         if not split_count:
             split_count = _find_split_count([link_text])
 
-        link = f"https://www.apkmirror.com{link_element.attrs['href']}"
+        href = link_element.attrs["href"]
+        link = f"https://www.apkmirror.com{href}"
+        # Same-page stable/beta uploads differ only in their label, which can
+        # appear in the link text, the first cell or the URL slug.
+        name = link_text or (cell_texts[0] if cell_texts else "")
+        prerelease = _is_prerelease(link_text, href, *cell_texts)
         variants.append(
             Variant(
                 is_bundle=is_bundle,
@@ -316,6 +391,8 @@ def get_variants(release_url: str, session: FlareSolverrSession) -> list[Variant
                 dpi=dpi,
                 split_count=split_count,
                 file_size=file_size,
+                name=name,
+                prerelease=prerelease,
             )
         )
 
@@ -355,6 +432,12 @@ def parse_variant_page_size(page: BeautifulSoup) -> int:
     return 0
 
 
+def _drop_prereleases(variants: list[Variant]) -> list[Variant]:
+    """Remove beta/alpha rows, unless nothing but pre-releases is left."""
+    stable = [v for v in variants if not v.prerelease]
+    return stable or variants
+
+
 # Upper bound on variant pages fetched per app/architecture. Release pages
 # list roughly 5-15 variants; this only guards against a pathological page.
 MAX_SIZE_PROBES = 16
@@ -367,6 +450,7 @@ def populate_variant_sizes(
     session: FlareSolverrSession,
     *,
     bundle_only: bool = False,
+    channel: str | None = None,
 ) -> None:
     """Fill in `file_size` for the variants that could actually be selected.
 
@@ -385,6 +469,7 @@ def populate_variant_sizes(
     ]
     if not candidates:
         return
+    candidates = _narrow_to_channel(candidates, channel)
 
     def density_class(variant: Variant) -> int:
         if dpi:
@@ -433,6 +518,7 @@ def select_variant(
     *,
     prefer_bundle: bool = False,
     bundle_only: bool = False,
+    channel: str | None = None,
 ) -> Variant:
     """Select the smallest safe APKMirror input for one configured output.
 
@@ -463,6 +549,24 @@ def select_variant(
         raise FailedToFindElement(
             f"{architecture} or universal downloadable variant"
         )
+    # One release page can list several uploads that differ only in their
+    # versionName channel -- Gboard's "18.5.4.993608717-release-arm64-v8a"
+    # and "18.5.4.993608717-beta-arm64-v8a" -- and the patches target one of
+    # them. Keep the targeted channel's rows (or, with no channel known,
+    # everything except pre-releases).
+    narrowed = _narrow_to_channel(candidates, channel)
+    if len(narrowed) < len(candidates):
+        skipped = [v.name or v.link for v in candidates if v not in narrowed]
+        print(
+            f"Ignoring variant(s) outside the targeted "
+            f"'{channel or 'stable'}' channel: {', '.join(skipped)}"
+        )
+    elif channel and not any(_has_channel(v, channel) for v in candidates):
+        print(
+            f"WARNING: no variant is labelled '{channel}'; "
+            "choosing among the stable variants instead."
+        )
+    candidates = narrowed
 
     def density_class(variant: Variant) -> int:
         if dpi:

@@ -384,5 +384,150 @@ class VariantSizeProbeTests(unittest.TestCase):
         self.assertIs(selected, exact)
 
 
+class PrereleaseVariantTests(unittest.TestCase):
+    ROW = """
+      <div class="table-row">
+        <div class="table-cell"><a class="accent_color" href="{href}">{label}</a></div>
+        <div class="table-cell">arm64-v8a</div>
+        <div class="table-cell">Android 9.0+</div>
+        <div class="table-cell">{dpi}</div>
+      </div>"""
+
+    def parse(self, *rows):
+        html = (
+            '<div class="table"><div class="table-row"><div class="table-cell">'
+            "Variant</div></div>" + "".join(rows) + "</div>"
+        )
+        response = Mock(status_code=200, content=html.encode())
+        with patch("apkmirror.flaresolverr_request", return_value=response):
+            return apkmirror.get_variants("https://example.test/release", session=None)
+
+    def test_beta_row_is_flagged_and_release_row_is_not(self):
+        variants = self.parse(
+            self.ROW.format(
+                href="/gboard-18-5-4-993608717-release-arm64-v8a-android-apk-download/",
+                label="18.5.4.993608717-release-arm64-v8a",
+                dpi="nodpi",
+            ),
+            self.ROW.format(
+                href="/gboard-18-5-4-993608717-beta-arm64-v8a-android-apk-download/",
+                label="18.5.4.993608717-beta-arm64-v8a",
+                dpi="nodpi",
+            ),
+        )
+        self.assertEqual([v.prerelease for v in variants], [False, True])
+        self.assertEqual(variants[0].name, "18.5.4.993608717-release-arm64-v8a")
+
+    def test_beta_flag_is_found_in_url_slug_when_label_is_plain(self):
+        variants = self.parse(
+            self.ROW.format(
+                href="/gboard-18-5-4-beta-arm64-v8a-android-apk-download/",
+                label="18.5.4.993608717",
+                dpi="nodpi",
+            )
+        )
+        self.assertTrue(variants[0].prerelease)
+
+    def test_select_never_picks_a_smaller_beta_over_the_release(self):
+        # Regression: Gboard lists release and beta on the same page; the
+        # beta was the smaller/equal row and got downloaded.
+        release = apkmirror.Variant(
+            is_bundle=False, link="https://example.test/release",
+            architecture="arm64-v8a", dpi="nodpi", file_size=120 * 1024**2,
+            name="18.5.4.993608717-release-arm64-v8a",
+        )
+        beta = apkmirror.Variant(
+            is_bundle=False, link="https://example.test/beta",
+            architecture="arm64-v8a", dpi="nodpi", file_size=100 * 1024**2,
+            name="18.5.4.993608717-beta-arm64-v8a", prerelease=True,
+        )
+        for order in ([release, beta], [beta, release]):
+            selected = apkmirror.select_variant(order, "arm64-v8a", "480")
+            self.assertIs(selected, release)
+
+    def test_beta_is_used_only_when_nothing_else_exists(self):
+        beta = apkmirror.Variant(
+            is_bundle=False, link="https://example.test/beta",
+            architecture="arm64-v8a", dpi="nodpi", prerelease=True,
+        )
+        self.assertIs(apkmirror.select_variant([beta], "arm64-v8a", "480"), beta)
+
+    def test_beta_pages_are_not_probed_for_size(self):
+        release = apkmirror.Variant(
+            is_bundle=False, link="https://example.test/release",
+            architecture="arm64-v8a", dpi="nodpi",
+        )
+        beta = apkmirror.Variant(
+            is_bundle=False, link="https://example.test/beta",
+            architecture="arm64-v8a", dpi="nodpi", prerelease=True,
+        )
+        page = Mock(status_code=200, content=b"File size: 5 MB (5,242,880 bytes)")
+        with patch("apkmirror.flaresolverr_request", return_value=page) as request:
+            apkmirror.populate_variant_sizes(
+                [release, beta], "arm64-v8a", "480", session=None
+            )
+        self.assertEqual([c.args[0] for c in request.call_args_list], [release.link])
+
+
+class ChannelSelectionTests(unittest.TestCase):
+    def row(self, channel, size, arch="arm64-v8a"):
+        return apkmirror.Variant(
+            is_bundle=False,
+            link=f"https://example.test/gboard-18-5-4-993608717-{channel}-{arch}-android-apk-download/",
+            architecture=arch,
+            dpi="nodpi",
+            file_size=size,
+            name=f"18.5.4.993608717-{channel}-{arch}",
+            prerelease=channel != "release",
+        )
+
+    def test_version_channel_is_read_from_the_full_version_name(self):
+        self.assertEqual(
+            apkmirror.version_channel("18.5.4.993608717-release-arm64-v8a"), "release"
+        )
+        self.assertEqual(
+            apkmirror.version_channel("18.5.4.993608717-beta-arm64-v8a"), "beta"
+        )
+        self.assertEqual(apkmirror.version_channel("18.5.4-release"), "release")
+        self.assertIsNone(apkmirror.version_channel("21.04.223"))
+        self.assertIsNone(apkmirror.version_channel("12.7.1-release.0"))
+
+    def test_release_version_picks_release_even_when_beta_is_smaller(self):
+        release = self.row("release", 120 * 1024**2)
+        beta = self.row("beta", 100 * 1024**2)
+        selected = apkmirror.select_variant(
+            [beta, release], "arm64-v8a", "480", channel="release"
+        )
+        self.assertIs(selected, release)
+
+    def test_beta_version_picks_beta(self):
+        release = self.row("release", 100 * 1024**2)
+        beta = self.row("beta", 120 * 1024**2)
+        selected = apkmirror.select_variant(
+            [release, beta], "arm64-v8a", "480", channel="beta"
+        )
+        self.assertIs(selected, beta)
+
+    def test_unlabelled_rows_fall_back_to_stable_selection(self):
+        plain = apkmirror.Variant(
+            is_bundle=False, link="https://example.test/plain",
+            architecture="arm64-v8a", dpi="nodpi", name="18.5.4.993608717",
+        )
+        selected = apkmirror.select_variant(
+            [plain], "arm64-v8a", "480", channel="release"
+        )
+        self.assertIs(selected, plain)
+
+    def test_only_the_targeted_channel_is_probed_for_size(self):
+        release = self.row("release", 0)
+        beta = self.row("beta", 0)
+        page = Mock(status_code=200, content=b"File size: 5 MB (5,242,880 bytes)")
+        with patch("apkmirror.flaresolverr_request", return_value=page) as request:
+            apkmirror.populate_variant_sizes(
+                [release, beta], "arm64-v8a", "480", session=None, channel="release"
+            )
+        self.assertEqual([c.args[0] for c in request.call_args_list], [release.link])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -233,6 +233,10 @@ def build_app(
         try:
             release_url = app.apkmirror_release_url(version)
             variants = apkmirror.get_variants(release_url, session=session)
+            # The patches may target a specific versionName such as
+            # "18.5.4.993608717-release-arm64-v8a"; its "-release"/"-beta"
+            # part picks the row among same-page uploads.
+            channel = apkmirror.version_channel(version)
             downloaded_paths: dict[str, str] = {}
             path_by_link: dict[str, str] = {}
 
@@ -246,6 +250,7 @@ def build_app(
                     app.dpi,
                     session=session,
                     bundle_only=app.wants_module,
+                    channel=channel,
                 )
                 variant = apkmirror.select_variant(
                     variants,
@@ -253,6 +258,7 @@ def build_app(
                     dpi=app.dpi,
                     prefer_bundle=app.wants_module,
                     bundle_only=app.wants_module,
+                    channel=channel,
                 )
                 source_path = path_by_link.get(variant.link)
                 if source_path is None:
