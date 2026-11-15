@@ -78,6 +78,12 @@ class FailedToFindElement(Exception):
         super().__init__(self.message)
 
 
+class NoMatchingVariant(FailedToFindElement):
+    """The release page lists no variant for the requested architecture
+    (nor a universal one). Distinct from a page that failed to load, so a
+    caller can skip just that architecture instead of the whole version."""
+
+
 class FailedToFetch(Exception):
     def __init__(self, url: str | None = None) -> None:
         self.message = f"Failed to fetch{' ' + url if url is not None else ''}"
@@ -125,7 +131,7 @@ def _normalize_architecture(value: str) -> str:
 
 
 _PRERELEASE_PATTERN = re.compile(
-    r"(?<![a-z0-9])(beta|alpha|dev|canary|nightly|preview)(?![a-z0-9])",
+    r"(?<![a-z0-9_])(beta|alpha|dev|canary|nightly|preview)(?![a-z0-9_])",
     re.IGNORECASE,
 )
 
@@ -176,7 +182,7 @@ def _url_slug(url: str) -> str:
 
 def _has_channel(variant: "Variant", channel: str) -> bool:
     pattern = re.compile(
-        rf"(?<![a-z0-9]){re.escape(channel)}(?![a-z0-9])", re.IGNORECASE
+        rf"(?<![a-z0-9_]){re.escape(channel)}(?![a-z0-9_])", re.IGNORECASE
     )
     return bool(
         pattern.search(variant.name) or pattern.search(_url_slug(variant.link))
@@ -560,7 +566,7 @@ def select_variant(
 
     candidates = [v for v in candidates if arch_rank(v) < 2]
     if not candidates:
-        raise FailedToFindElement(
+        raise NoMatchingVariant(
             f"{architecture} or universal downloadable variant"
         )
     # One release page can list several uploads that differ only in their

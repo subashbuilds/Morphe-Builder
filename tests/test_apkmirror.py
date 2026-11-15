@@ -517,6 +517,21 @@ class ChannelSelectionTests(unittest.TestCase):
         self.assertFalse(apkmirror._has_channel(beta, "release"))
         self.assertTrue(beta.link.count("-release/") == 1)
 
+    def test_lite_release_flavour_is_not_the_release_channel(self):
+        # Gboard also lists "18.5.4.993608717-lite_release-arm64-v8a", a
+        # different flavour; "_" must not count as a word boundary.
+        lite = apkmirror.Variant(
+            is_bundle=False, link="https://example.test/x/lite",
+            architecture="arm64-v8a", dpi="nodpi",
+            name="18.5.4.993608717-lite_release-arm64-v8a",
+        )
+        self.assertFalse(apkmirror._has_channel(lite, "release"))
+        release = self.row("release", 200 * 1024**2)
+        selected = apkmirror.select_variant(
+            [lite, release], "arm64-v8a", "480", channel="release"
+        )
+        self.assertIs(selected, release)
+
     def test_beta_version_picks_beta(self):
         release = self.row("release", 100 * 1024**2)
         beta = self.row("beta", 120 * 1024**2)
@@ -544,6 +559,22 @@ class ChannelSelectionTests(unittest.TestCase):
                 [release, beta], "arm64-v8a", "480", session=None, channel="release"
             )
         self.assertEqual([c.args[0] for c in request.call_args_list], [release.link])
+
+
+class NoMatchingVariantTests(unittest.TestCase):
+    def test_missing_architecture_raises_the_skippable_error(self):
+        arm_only = apkmirror.Variant(
+            is_bundle=True, link="https://example.test/arm",
+            architecture="arm64-v8a", dpi="480dpi",
+        )
+        with self.assertRaises(apkmirror.NoMatchingVariant):
+            apkmirror.select_variant(
+                [arm_only], "universal", "480", bundle_only=True
+            )
+        # Still catchable as before by code that handles FailedToFindElement.
+        self.assertTrue(
+            issubclass(apkmirror.NoMatchingVariant, apkmirror.FailedToFindElement)
+        )
 
 
 if __name__ == "__main__":

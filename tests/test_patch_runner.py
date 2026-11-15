@@ -88,6 +88,30 @@ class PatchRunnerTests(unittest.TestCase):
             )
 
 
+class SkippedArchitectureTests(unittest.TestCase):
+    def test_architecture_without_an_input_is_skipped_not_fatal(self):
+        app = AppConfig(
+            id="demo", name="Demo", package_name="com.demo", enabled=True,
+            apkmirror_org="demo", apkmirror_app="demo",
+            apkmirror_release_prefix="demo",
+            patches=SourceConfig("owner/patches", r"^patches.*\.mpp$"),
+            cli=SourceConfig("owner/cli", r"^cli.*\.jar$"),
+            build_mode="apk",
+            architectures=["arm64-v8a", "universal"],
+        )
+        with tempfile.TemporaryDirectory() as output_dir:
+            with patch("patch_runner._run_patch_command"):
+                outputs = build_all_outputs(
+                    app=app,
+                    cli_jar="cli.jar",
+                    patches_files=["p.mpp"],
+                    downloaded_apk_paths={"arm64-v8a": "/tmp/arm.apk"},
+                    version="1.0.0",
+                    output_dir=output_dir,
+                )
+        self.assertEqual([o.architecture for o in outputs], ["arm64-v8a"])
+
+
 class PatchRunnerBundleTests(unittest.TestCase):
     """The Morphe CLI merges split containers itself, but needs an absolute
     path (it symlinks the bundle into its temp dir), and an unpacked

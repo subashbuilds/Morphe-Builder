@@ -154,7 +154,10 @@ def build_all_outputs(
     for arch in app.architectures:
         downloaded_apk_path = downloaded_apk_paths.get(arch)
         if downloaded_apk_path is None:
-            raise PatchFailedError(f"No APKMirror input was selected for {arch}")
+            # The caller skips architectures APKMirror has no variant for;
+            # build only the ones that were downloaded.
+            print(f"[{app.id}] No input for {arch}; not building it.")
+            continue
         striplibs = None if arch == "universal" else arch
         variant_label = f"{arch}{dpi_label}"
 

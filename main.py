@@ -240,6 +240,7 @@ def build_app(
             downloaded_paths: dict[str, str] = {}
             path_by_link: dict[str, str] = {}
 
+            skipped_archs: list[str] = []
             for arch in app.architectures:
                 # The release page lists no file sizes, so read them from the
                 # candidate variants' own pages; otherwise "smallest size"
@@ -252,14 +253,22 @@ def build_app(
                     bundle_only=app.wants_module,
                     channel=channel,
                 )
-                variant = apkmirror.select_variant(
-                    variants,
-                    arch,
-                    dpi=app.dpi,
-                    prefer_bundle=app.wants_module,
-                    bundle_only=app.wants_module,
-                    channel=channel,
-                )
+                try:
+                    variant = apkmirror.select_variant(
+                        variants,
+                        arch,
+                        dpi=app.dpi,
+                        prefer_bundle=app.wants_module,
+                        bundle_only=app.wants_module,
+                        channel=channel,
+                    )
+                except apkmirror.NoMatchingVariant as e:
+                    # e.g. an app with no universal bundle: build the
+                    # architectures that do exist rather than losing the
+                    # whole version.
+                    print(f"[{app.id}] Skipping {arch} for {version}: {e}.")
+                    skipped_archs.append(arch)
+                    continue
                 source_path = path_by_link.get(variant.link)
                 if source_path is None:
                     digest = hashlib.sha256(variant.link.encode()).hexdigest()[:12]
@@ -278,6 +287,16 @@ def build_app(
                 else:
                     print(f"[{app.id}] Reusing selected {variant.architecture} source for {arch}.")
                 downloaded_paths[arch] = source_path
+
+            if not downloaded_paths:
+                raise apkmirror.NoMatchingVariant(
+                    f"downloadable variant for any of {app.architectures}"
+                )
+            if skipped_archs:
+                print(
+                    f"[{app.id}] Building {version} without: "
+                    f"{', '.join(skipped_archs)} (no matching variant)."
+                )
 
             outputs = build_all_outputs(
                 app=app,
